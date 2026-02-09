@@ -4,6 +4,7 @@ from datetime import datetime
 from database import projects_collection, configs_collection, tasks_collection, associates_collection, users_collection, notifications_collection
 from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel
 from models.notification import NotificationModel
+from models.task import TaskModel # IMPORTED
 from routes.deps import get_current_user
 from models.user import UserModel
 from fastapi import Depends
@@ -11,7 +12,7 @@ from fastapi import Depends
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
 # --- HELPER: Notify Associate on Assignment ---
-async def notify_associate_assignment(associate_id: str, project_code: str, event_type: str, agency_id: str):
+async def notify_associate_assignment(associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
     """
     Send a notification to an associate when they are assigned to an event.
     Looks up the associate's email, finds the corresponding user, and creates notification.
@@ -29,13 +30,16 @@ async def notify_associate_assignment(associate_id: str, project_code: str, even
     if not user:
         return  # No user account, can't notify
     
+    # Format Date
+    formatted_date = event_date.strftime("%b %d, %Y") if event_date else "TBD"
+
     # Create notification
     notification = NotificationModel(
         user_id=user.get("id"),
         agency_id=agency_id,
         type="event_assigned",
         title="Assigned to Event",
-        message=f"You have been assigned to {event_type} for project {project_code}",
+        message=f"You have been assigned to {event_type} on {formatted_date} for project {project_code}",
         resource_type="project",
         resource_id=None  # Could add project_id here
     )
@@ -386,6 +390,41 @@ async def add_event_to_project(project_id: str, event: EventModel = Body(...), c
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # --- SYNC: Create Tasks for Deliverables ---
+    # Deliverables should be treated as Tasks for progress tracking
+    if event.deliverables:
+        new_tasks = []
+        project_code = "UNKNOWN" # Fetch if needed, or query again. 
+        # Better to query project to get code? 
+        # For now, let's just use generic title or skip project code in title if simpler.
+        
+        # We need project details for the task
+        project_doc = await projects_collection.find_one({"_id": ObjectId(project_id)})
+        project_code = project_doc.get("code", "PROJECT") if project_doc else "PROJECT"
+        
+        for deliverable in event.deliverables:
+            # Create a Task for this deliverable
+            task = TaskModel(
+                title=f"{deliverable.type} ({event.type})",
+                description=f"Deliverable for {event.type}",
+                project_id=project_id,
+                event_id=event.id,
+                # Store link to deliverable if needed in metadata
+                status="todo", # Default
+                priority="medium",
+                due_date=deliverable.due_date,
+                assigned_to=deliverable.incharge_id,
+                studio_id=current_agency_id,
+                created_by=current_user.id,
+                type="project",
+                category="deliverable"
+            )
+            new_tasks.append(task.model_dump())
+            
+        if new_tasks:
+            await tasks_collection.insert_many(new_tasks)
+            print(f"✅ Created {len(new_tasks)} tasks from deliverables for event {event.type}")
+
     return {"message": "Event added successfully"}
 
 @router.patch("/{project_id}")
@@ -447,11 +486,13 @@ async def add_assignment(project_id: str, event_id: str, assignment: AssignmentM
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
-    # Find the event to get its type
+    # Find the event to get its type and date
     event_type = "Event"
+    event_date = None
     for evt in project.get("events", []):
         if evt.get("id") == event_id:
             event_type = evt.get("type", "Event")
+            event_date = evt.get("start_date")
             break
 
     result = await projects_collection.update_one(
@@ -467,6 +508,7 @@ async def add_assignment(project_id: str, event_id: str, assignment: AssignmentM
         assignment.associate_id, 
         project.get("code", "Unknown"), 
         event_type,
+        event_date,
         current_agency_id
     )
 

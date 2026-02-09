@@ -75,6 +75,10 @@ async def get_calendar_events(
                 
                 # ASSIGNED_ONLY FILTER for events
                 if assigned_only:
+                    # If user has no associate record, they can't be assigned to any event
+                    if not user_associate_id:
+                        continue  # Skip all events
+                    
                     # Check if current user's associate_id is in this event's assignments
                     event_assignments = event.get("assignments", [])
                     is_assigned = any(
@@ -103,7 +107,11 @@ async def get_calendar_events(
         task_query = {"studio_id": current_agency_id}
         
         # ASSIGNED_ONLY FILTER for tasks
-        if assigned_only:
+        # RBAC: Members can ONLY see their own tasks
+        if current_user.role.lower() == 'member':
+            task_query["assigned_to"] = current_user.id
+        elif assigned_only:
+            # For non-members, respect the filter
             task_query["assigned_to"] = current_user.id
         
         # Fetch all tasks (filtering date in Python due to mixed data types: String vs Date)

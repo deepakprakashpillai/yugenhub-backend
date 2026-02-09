@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import associate, client, config, project, tasks, auth, calendar, notifications, users
+from routes import associate, client, config, project, tasks, auth, calendar, notifications, users, dashboard
 
 app = FastAPI(title="YugenHub API")
 
@@ -23,6 +23,7 @@ app.include_router(tasks.router)
 app.include_router(calendar.router)
 app.include_router(notifications.router)
 app.include_router(users.router)
+app.include_router(dashboard.router)
 
 @app.get("/")
 async def root():

@@ -8,7 +8,7 @@ class NotificationModel(BaseModel):
     """In-app notification for task assignments and updates."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str  # Who receives the notification
-    type: Literal['task_assigned', 'task_updated', 'mention', 'reminder'] = 'task_assigned'
+    type: Literal['task_assigned', 'task_updated', 'mention', 'reminder', 'event_assigned'] = 'task_assigned'
     
     # Content
     title: str

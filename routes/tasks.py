@@ -73,11 +73,12 @@ async def create_task(
     
     # --- NOTIFICATION LOGIC (CREATE) ---
     if task.assigned_to and task.assigned_to != current_user.id:
+        due_str = f" (Due: {task.due_date.strftime('%b %d')})" if task.due_date else ""
         notification = NotificationModel(
             user_id=task.assigned_to,
             type="task_assigned",
             title="New User Task",
-            message=f"You have been assigned to: {task.title}",
+            message=f"You have been assigned to: {task.title}{due_str}",
             resource_type="task",
             resource_id=task.id
         )
@@ -91,21 +92,38 @@ async def list_tasks(
     type: Optional[str] = None,
     category: Optional[str] = None,
     status: Optional[str] = None,
+    priority: Optional[str] = None,
     assigned_to: Optional[str] = None,
     completed: Optional[bool] = None,
     has_project: Optional[bool] = None,
     page: int = Query(1, ge=1),
     limit: int = Query(100, le=500),
     search: Optional[str] = None,
+    sort_by: Optional[str] = Query("created_at", description="Field to sort by: created_at, due_date, priority"),
+    order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
     current_user: UserModel = Depends(get_current_user)
 ):
-    """List tasks with robust filtering and pagination"""
+    """List tasks with robust filtering, sorting, and pagination"""
+    
+    # ---------------------------------------------------------
+    # RBAC ENFORCEMENT: 
+    # Members can ONLY see tasks assigned to them.
+    # ---------------------------------------------------------
     # Build Aggregation Pipeline
     pipeline = []
 
     # 1. Match Stage (Filters)
     match_stage = {"studio_id": current_user.agency_id}
     
+    # RBAC: Force assignment filter for members
+    print(f"DEBUG: User {current_user.email}, Role: {current_user.role}")
+    if current_user.role.lower() == 'member':
+        match_stage["assigned_to"] = current_user.id
+        print(f"DEBUG: Enforcing RBAC for member. Filter: {match_stage['assigned_to']}")
+    elif assigned_to:
+        # Only allow filtering by assigned_to if NOT a member (Admins/Owners)
+        match_stage["assigned_to"] = assigned_to
+
     if search:
         match_stage["title"] = {"$regex": search, "$options": "i"}
     if project_id:
@@ -120,16 +138,19 @@ async def list_tasks(
     if category:
         match_stage["category"] = category
 
-    if status and status != 'all':
-        match_stage["status"] = status
-    
+    # Apply completed filter first, then status filter to allow status to override
     if completed is True:
         match_stage["status"] = "done"
     elif completed is False:
         match_stage["status"] = {"$ne": "done"}
 
-    if assigned_to:
-        match_stage["assigned_to"] = assigned_to
+    if status and status != 'all':
+        match_stage["status"] = status
+    
+    if priority and priority != 'all':
+        match_stage["priority"] = priority
+
+    # Note: assigned_to handled above for RBAC
 
     pipeline.append({"$match": match_stage})
 
@@ -143,23 +164,50 @@ async def list_tasks(
         }
     })
     
-    # 3. Add Fields from Project (Unwind optional, preserve null)
+    # 3. Add Fields from Project + Priority Score
     pipeline.append({
         "$addFields": {
             "project_name": {"$arrayElemAt": ["$project_info.title", 0]},
             "client_name": {"$arrayElemAt": ["$project_info.metadata.client_name", 0]},
-            "project_color": {"$arrayElemAt": ["$project_info.color", 0]} # If project has color
+            "project_color": {"$arrayElemAt": ["$project_info.color", 0]},
+            # Map priority strings to numeric scores for sorting
+            "priority_score": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$eq": ["$priority", "urgent"]}, "then": 4},
+                        {"case": {"$eq": ["$priority", "high"]}, "then": 3},
+                        {"case": {"$eq": ["$priority", "medium"]}, "then": 2},
+                        {"case": {"$eq": ["$priority", "low"]}, "then": 1}
+                    ],
+                    "default": 0
+                }
+            }
         }
     })
     
     # 4. Remove project_info array to keep clean
     pipeline.append({"$project": {"project_info": 0}})
 
-    # 5. Sort
-    sort_stage = {"created_at": -1} # Default
-    if not completed:
-        # TODO: Advanced sort logic if needed
-        pass
+    # 5. Sort (Compound: Primary sort + Priority as tiebreaker)
+    sort_direction = -1 if order == "desc" else 1
+    primary_sort_field = sort_by if sort_by in ["created_at", "due_date", "priority_score"] else "created_at"
+    
+    # If sorting by priority, use priority_score
+    if sort_by == "priority":
+        primary_sort_field = "priority_score"
+    
+    # If sorting by due_date, we want to sort by DATE only (ignoring time) so priority tiebreaker works for same day
+    if sort_by == "due_date":
+        pipeline.append({
+            "$addFields": {
+                "due_date_day": {
+                    "$dateToString": {"format": "%Y-%m-%d", "date": "$due_date"}
+                }
+            }
+        })
+        primary_sort_field = "due_date_day"
+    
+    sort_stage = {primary_sort_field: sort_direction, "priority_score": -1}
     pipeline.append({"$sort": sort_stage})
 
     # 6. Pagination (Facet for total count and data)
@@ -239,11 +287,20 @@ async def update_task(
             current_title = update_data.get("title") or existing_task.get("title", "Untitled Task")
             
             # Notify the new assignee
+            due_date = update_data.get("due_date", existing_task.get("due_date"))
+            # Handle string date if passed as string (unlikely via Pydantic but possible in dict)
+            if isinstance(due_date, str):
+                try: 
+                    due_date = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
+                except: pass
+
+            due_str = f" (Due: {due_date.strftime('%b %d')})" if due_date else ""
+            
             notification = NotificationModel(
                 user_id=new_assignee,
                 type="task_assigned",
                 title="New Task Assigned",
-                message=f"You have been assigned to: {current_title}",
+                message=f"You have been assigned to: {current_title}{due_str}",
                 resource_type="task",
                 resource_id=task_id
             )
