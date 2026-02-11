@@ -5,6 +5,7 @@ from routes.deps import get_current_user
 from models.user import UserModel
 from fastapi import Depends
 from database import configs_collection
+from logging_config import get_logger
 
 # Helper function to parse MongoDB data, assuming it handles _id conversion
 # This function is not provided in the original code, but is implied by the change.
@@ -15,8 +16,9 @@ def parse_mongo_data(data: dict) -> dict:
     return data
 
 router = APIRouter(prefix="/api/config", tags=["Configuration"])
+logger = get_logger("config")
 
-@router.get("/")
+@router.get("")
 async def get_config(current_user: UserModel = Depends(get_current_user)):
     current_agency_id = current_user.agency_id
     config = await configs_collection.find_one({"agency_id": current_agency_id})
@@ -35,4 +37,5 @@ async def initialize_config(config: AgencyConfigModel = Body(...), current_user:
         {"$set": config.model_dump()},
         upsert=True
     )
+    logger.info(f"Config initialized/updated", extra={"data": {"agency_id": current_agency_id}})
     return {"message": "Config initialized successfully"}

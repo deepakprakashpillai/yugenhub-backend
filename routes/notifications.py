@@ -4,8 +4,10 @@ from database import notifications_collection
 from models.notification import NotificationModel
 from models.user import UserModel
 from routes.deps import get_current_user
+from logging_config import get_logger
 
 router = APIRouter(prefix="/api/notifications", tags=["Notifications"])
+logger = get_logger("notifications")
 
 
 def parse_mongo_data(data):
@@ -18,7 +20,7 @@ def parse_mongo_data(data):
     return data
 
 
-@router.get("/", response_model=List[dict])
+@router.get("", response_model=List[dict])
 async def get_notifications(
     unread_only: bool = False,
     current_user: UserModel = Depends(get_current_user)
@@ -53,6 +55,7 @@ async def mark_as_read(
         {"$set": {"read": True}}
     )
     if result.matched_count == 0:
+        logger.warning(f"Notification not found for mark-as-read", extra={"data": {"notification_id": notification_id}})
         raise HTTPException(status_code=404, detail="Notification not found")
     return {"message": "Marked as read"}
 

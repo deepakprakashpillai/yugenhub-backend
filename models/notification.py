@@ -18,6 +18,9 @@ class NotificationModel(BaseModel):
     resource_type: Optional[Literal['task', 'project', 'event']] = 'task'
     resource_id: Optional[str] = None  # ID of the task/project/event
     
+    # Context
+    metadata: Optional[dict] = None  # Extra data (project_title, assigner_name, etc.)
+    
     # State
     read: bool = False
     created_at: datetime = Field(default_factory=datetime.now)

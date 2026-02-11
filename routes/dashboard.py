@@ -11,8 +11,10 @@ from database import (
 from routes.deps import get_current_user
 from datetime import datetime, timedelta
 from bson import ObjectId
+from logging_config import get_logger
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
+logger = get_logger("dashboard")
 
 # Helper to parse objectid
 def parse_mongo_data(data):

@@ -6,9 +6,11 @@ from models.task import TaskModel, TaskHistoryModel
 from models.notification import NotificationModel
 from models.user import UserModel
 from routes.deps import get_current_user
+from logging_config import get_logger
 import uuid
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
+logger = get_logger("tasks")
 
 # --- HELPERS ---
 
@@ -49,13 +51,14 @@ async def log_history(task_id: str, user_id: str, changes: Dict[str, Any], comme
 
 # --- ENDPOINTS ---
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_task(
     task: TaskModel = Body(...),
     current_user: UserModel = Depends(get_current_user)
 ):
     """Create a new task (Owner/Admin only)"""
     if current_user.role not in ["owner", "admin"]:
+        logger.warning(f"Task creation denied: insufficient role", extra={"data": {"role": current_user.role}})
         raise HTTPException(status_code=403, detail="Only Owners and Admins can create tasks")
     
     task.created_by = current_user.id
@@ -73,20 +76,45 @@ async def create_task(
     
     # --- NOTIFICATION LOGIC (CREATE) ---
     if task.assigned_to and task.assigned_to != current_user.id:
+        # 1. Get Project Details if exists
+        project_title = None
+        if task.project_id:
+            project = await projects_collection.find_one({"id": task.project_id})
+            if project:
+                project_title = project.get("title")
+
+        # 2. Construct Rich Message
+        assigner_name = current_user.name
         due_str = f" (Due: {task.due_date.strftime('%b %d')})" if task.due_date else ""
+        
+        message = f"**{assigner_name}** assigned you a new task: **{task.title}**"
+        if project_title:
+            message += f" in **{project_title}**"
+        message += due_str
+
+        # 3. Create Notification with Metadata
         notification = NotificationModel(
             user_id=task.assigned_to,
             type="task_assigned",
-            title="New User Task",
-            message=f"You have been assigned to: {task.title}{due_str}",
+            title="New Assignment",
+            message=message,
             resource_type="task",
-            resource_id=task.id
+            resource_id=task.id,
+            metadata={
+                "project_id": task.project_id,
+                "project_title": project_title,
+                "assigner_name": assigner_name,
+                "assigner_id": current_user.id,
+                "due_date": task.due_date.isoformat() if task.due_date else None
+            }
         )
         await notifications_collection.insert_one(notification.model_dump())
+        logger.info(f"Task assignment notification sent", extra={"data": {"task_id": task.id, "assignee": task.assigned_to}})
     
+    logger.info(f"Task created", extra={"data": {"task_id": task.id, "title": task.title, "type": task.type, "project_id": task.project_id}})
     return parse_mongo_data(created_task)
 
-@router.get("/")
+@router.get("")
 async def list_tasks(
     project_id: Optional[str] = None,
     type: Optional[str] = None,
@@ -101,13 +129,15 @@ async def list_tasks(
     search: Optional[str] = None,
     sort_by: Optional[str] = Query("created_at", description="Field to sort by: created_at, due_date, priority"),
     order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
+    context: Optional[str] = Query("tasks_page", description="'tasks_page' or 'project_page'"),
     current_user: UserModel = Depends(get_current_user)
 ):
     """List tasks with robust filtering, sorting, and pagination"""
     
     # ---------------------------------------------------------
     # RBAC ENFORCEMENT: 
-    # Members can ONLY see tasks assigned to them.
+    # Members can ONLY see tasks assigned to them on the Tasks Page.
+    # On the Project Page, members can see ALL tasks for that project.
     # ---------------------------------------------------------
     # Build Aggregation Pipeline
     pipeline = []
@@ -115,11 +145,12 @@ async def list_tasks(
     # 1. Match Stage (Filters)
     match_stage = {"studio_id": current_user.agency_id}
     
-    # RBAC: Force assignment filter for members
-    print(f"DEBUG: User {current_user.email}, Role: {current_user.role}")
+    # RBAC: Force assignment filter for members (unless viewing a project's tasks)
     if current_user.role.lower() == 'member':
-        match_stage["assigned_to"] = current_user.id
-        print(f"DEBUG: Enforcing RBAC for member. Filter: {match_stage['assigned_to']}")
+        if context == "project_page" and project_id:
+            pass  # Allow member to see all tasks in the project
+        else:
+            match_stage["assigned_to"] = current_user.id
     elif assigned_to:
         # Only allow filtering by assigned_to if NOT a member (Admins/Owners)
         match_stage["assigned_to"] = assigned_to
@@ -247,6 +278,7 @@ async def update_task(
     is_assignee = existing_task.get("assigned_to") == current_user.id
     
     if not (is_owner_admin or is_assignee):
+        logger.warning(f"Task update denied: not authorized", extra={"data": {"task_id": task_id, "role": current_user.role}})
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
     
     # Blocked Status Logic
@@ -286,7 +318,16 @@ async def update_task(
             # Determine latest title
             current_title = update_data.get("title") or existing_task.get("title", "Untitled Task")
             
-            # Notify the new assignee
+            # 1. Get Project Details
+            project_id = existing_task.get("project_id")
+            project_title = None
+            if project_id:
+                project = await projects_collection.find_one({"id": project_id})
+                if project:
+                    project_title = project.get("title")
+
+            # 2. Construct Rich Message
+            assigner_name = current_user.name
             due_date = update_data.get("due_date", existing_task.get("due_date"))
             # Handle string date if passed as string (unlikely via Pydantic but possible in dict)
             if isinstance(due_date, str):
@@ -294,18 +335,33 @@ async def update_task(
                     due_date = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
                 except: pass
 
-            due_str = f" (Due: {due_date.strftime('%b %d')})" if due_date else ""
+            due_str = f" (Due: {due_date.strftime('%b %d')})" if due_date and isinstance(due_date, datetime) else ""
             
+            message = f"**{assigner_name}** assigned you: **{current_title}**"
+            if project_title:
+                message += f" in **{project_title}**"
+            message += due_str
+            
+            # 3. Create Notification with Metadata
             notification = NotificationModel(
                 user_id=new_assignee,
                 type="task_assigned",
                 title="New Task Assigned",
-                message=f"You have been assigned to: {current_title}{due_str}",
+                message=message,
                 resource_type="task",
-                resource_id=task_id
+                resource_id=task_id,
+                 metadata={
+                    "project_id": project_id,
+                    "project_title": project_title,
+                    "assigner_name": assigner_name,
+                    "assigner_id": current_user.id,
+                    "due_date": due_date.isoformat() if due_date and isinstance(due_date, datetime) else None
+                }
             )
             await notifications_collection.insert_one(notification.model_dump())
+            logger.info(f"Task reassignment notification sent", extra={"data": {"task_id": task_id, "new_assignee": new_assignee}})
     
+    logger.info(f"Task updated", extra={"data": {"task_id": task_id, "fields_changed": list(changes.keys())}})
     updated_task = await tasks_collection.find_one({"id": task_id})
     return parse_mongo_data(updated_task)
 
@@ -316,12 +372,15 @@ async def delete_task(
 ):
     """Hard delete task (Owner/Admin only)"""
     if current_user.role not in ["owner", "admin"]:
+        logger.warning(f"Task deletion denied: insufficient role", extra={"data": {"task_id": task_id, "role": current_user.role}})
         raise HTTPException(status_code=403, detail="Only Owners and Admins can delete tasks")
         
     result = await tasks_collection.delete_one({"id": task_id, "studio_id": current_user.agency_id})
     if result.deleted_count == 0:
+        logger.warning(f"Task deletion failed: not found", extra={"data": {"task_id": task_id}})
         raise HTTPException(status_code=404, detail="Task not found")
-        
+    
+    logger.info(f"Task deleted", extra={"data": {"task_id": task_id}})
     return {"message": "Task deleted successfully"}
 
 @router.get("/{task_id}/history")

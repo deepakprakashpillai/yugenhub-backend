@@ -5,9 +5,11 @@ from database import users_collection, configs_collection
 from models.user import UserModel
 from routes.deps import create_access_token
 from datetime import datetime
+from logging_config import get_logger
 import os
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+logger = get_logger("auth")
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID") 
 
@@ -20,15 +22,15 @@ async def google_login(token_data: dict = Body(...)):
     """
     token = token_data.get("token")
     if not token:
+        logger.warning("Login attempt with missing Google token")
         raise HTTPException(status_code=400, detail="Missing Google Token")
 
     try:
         # 1. Verify Google Token
-        # Use verify_oauth2_token to strictly validate the integrity and source of the token
         try:
              id_info = id_token.verify_oauth2_token(token, requests.Request(), GOOGLE_CLIENT_ID)
         except ValueError as e:
-             print(f"Token verification failed: {e}")
+             logger.warning(f"Google token verification failed: {e}")
              raise HTTPException(status_code=401, detail="Invalid Google Token")
 
         email = id_info.get("email")
@@ -37,6 +39,7 @@ async def google_login(token_data: dict = Body(...)):
         picture = id_info.get("picture")
 
         if not email:
+            logger.warning("Google token decoded but no email found")
             raise HTTPException(status_code=400, detail="Invalid Token: No email found")
 
         # 2. Check Database for Existing User
@@ -44,6 +47,7 @@ async def google_login(token_data: dict = Body(...)):
 
         if not user_doc:
             # INVITE ONLY MODEL -> REJECT
+            logger.warning(f"Login denied: email not whitelisted", extra={"data": {"email": email}})
             raise HTTPException(status_code=403, detail="Access Denied. Your email is not whitelisted.")
         
         # 3. Update User Info (Sync latest name/pic from Google)
@@ -63,6 +67,11 @@ async def google_login(token_data: dict = Body(...)):
             data={"sub": current_user.id, "agency_id": current_user.agency_id}
         )
 
+        logger.info(
+            f"Login successful",
+            extra={"data": {"email": email, "user_id": current_user.id, "role": current_user.role, "agency_id": current_user.agency_id}}
+        )
+
         return {
             "access_token": access_token, 
             "token_type": "bearer",
@@ -76,8 +85,10 @@ async def google_login(token_data: dict = Body(...)):
             }
         }
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        print(f"Auth Error: {e}")
+        logger.error(f"Authentication failed with unexpected error: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
 
 
@@ -87,6 +98,7 @@ async def google_login(token_data: dict = Body(...)):
 @router.get("/dev/users")
 async def list_dev_users():
     """[DEV ONLY] List all users for dev login selector."""
+    logger.debug("Dev endpoint: listing users")
     users = await users_collection.find({}).to_list(100)
     return [
         {
@@ -105,12 +117,15 @@ async def dev_login(user_id: str):
     """[DEV ONLY] Issue a JWT for any user, bypassing Google OAuth."""
     user_doc = await users_collection.find_one({"id": user_id})
     if not user_doc:
+        logger.warning(f"Dev login failed: user not found", extra={"data": {"user_id": user_id}})
         raise HTTPException(status_code=404, detail="User not found")
 
     user = UserModel(**user_doc)
     access_token = create_access_token(
         data={"sub": user.id, "agency_id": user.agency_id}
     )
+
+    logger.info(f"Dev login successful", extra={"data": {"user_id": user.id, "email": user.email, "agency_id": user.agency_id}})
 
     return {
         "access_token": access_token,
@@ -143,5 +158,6 @@ async def seed_dev_users_endpoint():
         if not await users_collection.find_one({"email": u["email"]}):
             await users_collection.insert_one(UserModel(**u).model_dump(by_alias=True))
             count += 1
-            
+    
+    logger.info(f"Dev seed completed", extra={"data": {"users_created": count}})
     return {"message": f"Seeded {count} users"}

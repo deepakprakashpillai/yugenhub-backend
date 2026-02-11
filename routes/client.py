@@ -8,13 +8,15 @@ from models.user import UserModel
 from fastapi import Depends
 from database import clients_collection
 from bson import ObjectId
+from logging_config import get_logger
 
 router = APIRouter(
     prefix="/api/clients",
     tags=["Clients"]
 )
+logger = get_logger("clients")
 
-@router.get("/")
+@router.get("")
 async def get_clients(
     search: str = Query(None, description="Search by name or phone"),
     client_type: str = Query(None, alias="type", description="Filter by Lead, Active, etc."),
@@ -119,13 +121,14 @@ async def get_client(id: str, current_user: UserModel = Depends(get_current_user
     client["_id"] = str(client["_id"])
     return client
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_client(client: ClientModel = Body(...), current_user: UserModel = Depends(get_current_user)):
     """CREATE: Add a new client"""
     current_agency_id = current_user.agency_id
     client.agency_id = current_agency_id # Auto-assign agency
     
     result = await clients_collection.insert_one(client.model_dump())
+    logger.info(f"Client created", extra={"data": {"id": str(result.inserted_id), "name": client.name}})
     return {"message": "Client created successfully", "id": str(result.inserted_id)}
 
 @router.patch("/{client_id}")
@@ -142,8 +145,10 @@ async def update_client(client_id: str, update_data: dict = Body(...), current_u
     )
 
     if not updated_client:
+        logger.warning(f"Client update failed: not found", extra={"data": {"client_id": client_id}})
         raise HTTPException(status_code=404, detail="Client not found")
 
+    logger.info(f"Client updated", extra={"data": {"client_id": client_id, "fields": list(update_data.keys())}})
     updated_client["_id"] = str(updated_client["_id"])
     return updated_client
 
@@ -157,6 +162,8 @@ async def delete_client(client_id: str, current_user: UserModel = Depends(get_cu
     delete_result = await clients_collection.delete_one({"_id": ObjectId(client_id), "agency_id": current_agency_id})
 
     if delete_result.deleted_count == 0:
+        logger.warning(f"Client deletion failed: not found", extra={"data": {"client_id": client_id}})
         raise HTTPException(status_code=404, detail="Client not found")
     
+    logger.info(f"Client deleted", extra={"data": {"client_id": client_id}})
     return None

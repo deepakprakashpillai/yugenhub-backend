@@ -5,10 +5,13 @@ from datetime import datetime, timedelta
 from typing import Optional
 from database import users_collection
 from models.user import UserModel
+from logging_config import get_logger
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = get_logger("auth")
 
 # CONFIG
 SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret_key_change_in_prod")
@@ -37,12 +40,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str = payload.get("sub")
         if user_id is None:
+            logger.warning("Token decoded but missing 'sub' claim")
             raise credentials_exception
-    except JWTError:
+    except JWTError as e:
+        logger.warning(f"JWT decode failed: {e}")
         raise credentials_exception
         
     user = await users_collection.find_one({"id": user_id})
     if user is None:
+        logger.warning(f"Token valid but user not found in DB", extra={"data": {"user_id": user_id}})
         raise credentials_exception
         
     return UserModel(**user)

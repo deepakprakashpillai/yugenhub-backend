@@ -1,18 +1,21 @@
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
+from logging_config import get_logger
 
 # 1. Force load the env file
 load_dotenv()
 
+logger = get_logger("database")
+
 # 2. Get the URI
 uri = os.getenv("MONGO_URI")
 
-# 3. Add a Print statement here temporarily to debug!
+# 3. Log connection status
 if uri:
-    print(f"✅ Connection string found: {uri[:20]}...") 
+    logger.info(f"MongoDB connection string found: {uri[:20]}...")
 else:
-    print("❌ ERROR: MONGO_URI not found in .env file!")
+    logger.error("MONGO_URI not found in .env file!")
 
 # 4. Initialize client
 client = AsyncIOMotorClient(uri, tlsAllowInvalidCertificates=True)
@@ -26,3 +29,5 @@ users_collection = db.get_collection("users")
 tasks_collection = db.get_collection("tasks")
 task_history_collection = db.get_collection("task_history")
 notifications_collection = db.get_collection("notifications")
+
+logger.info("Database collections initialized", extra={"data": {"db": "yugen_hub"}})

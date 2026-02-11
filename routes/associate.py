@@ -6,6 +6,7 @@ from models.associate import AssociateModel
 from routes.deps import get_current_user
 from models.user import UserModel
 from fastapi import Depends
+from logging_config import get_logger
 from datetime import datetime
 import uuid
 
@@ -13,6 +14,7 @@ router = APIRouter(
     prefix="/api/associates",
     tags=["Associates"]
 )
+logger = get_logger("associates")
 
 # --- HELPER: Sync In-house Associate to User ---
 async def sync_inhouse_to_user(associate_data: dict, agency_id: str):
@@ -48,9 +50,9 @@ async def sync_inhouse_to_user(associate_data: dict, agency_id: str):
     }
     
     await users_collection.insert_one(new_user)
-    print(f"✅ Created User for In-house Associate: {email}")
+    logger.info(f"Created user for in-house associate", extra={"data": {"email": email, "agency_id": agency_id}})
 
-@router.get("/")
+@router.get("")
 async def get_associates(
     search: str = Query(None, description="Search by name, phone, or city"),
     role: str = Query(None, description="Filter by primary role"),
@@ -153,7 +155,7 @@ async def get_associate(id: str, current_user: UserModel = Depends(get_current_u
     associate["_id"] = str(associate["_id"])
     return associate
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_associate(associate: AssociateModel = Body(...), current_user: UserModel = Depends(get_current_user)):
     """CREATE: Add a new associate"""
     current_agency_id = current_user.agency_id
@@ -172,6 +174,7 @@ async def create_associate(associate: AssociateModel = Body(...), current_user: 
     # Sync to Users collection if In-house
     await sync_inhouse_to_user(associate_data, current_agency_id)
     
+    logger.info(f"Associate created", extra={"data": {"id": str(result.inserted_id), "name": associate.name, "type": associate.employment_type}})
     return {"message": "Associate created successfully", "id": str(result.inserted_id)}
 
 @router.patch("/{associate_id}")
@@ -202,11 +205,13 @@ async def update_associate(associate_id: str, update_data: dict = Body(...), cur
     )
 
     if not updated_doc:
+        logger.warning(f"Associate update failed: not found", extra={"data": {"associate_id": associate_id}})
         raise HTTPException(status_code=404, detail="Associate not found")
     
     # Sync to Users collection if In-house
     await sync_inhouse_to_user(updated_doc, current_agency_id)
 
+    logger.info(f"Associate updated", extra={"data": {"associate_id": associate_id, "fields": list(update_data.keys())}})
     updated_doc["_id"] = str(updated_doc["_id"])
     return updated_doc
 
@@ -220,6 +225,9 @@ async def delete_associate(associate_id: str, current_user: UserModel = Depends(
     delete_result = await associates_collection.delete_one({"_id": ObjectId(associate_id), "agency_id": current_agency_id})
 
     if delete_result.deleted_count == 0:
+        logger.warning(f"Associate deletion failed: not found", extra={"data": {"associate_id": associate_id}})
         raise HTTPException(status_code=404, detail="Associate not found")
+    
+    logger.info(f"Associate deleted", extra={"data": {"associate_id": associate_id}})
     
 

@@ -8,8 +8,10 @@ from models.task import TaskModel # IMPORTED
 from routes.deps import get_current_user
 from models.user import UserModel
 from fastapi import Depends
+from logging_config import get_logger
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
+logger = get_logger("projects")
 
 # --- HELPER: Notify Associate on Assignment ---
 async def notify_associate_assignment(associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
@@ -45,7 +47,7 @@ async def notify_associate_assignment(associate_id: str, project_code: str, even
     )
     
     await notifications_collection.insert_one(notification.model_dump())
-    print(f"🔔 Notification sent to {associate.get('name')} for event assignment")
+    logger.info(f"Notification sent to associate for event assignment", extra={"data": {"associate": associate.get('name'), "project": project_code, "event": event_type}})
 
 # --- HELPER FUNCTION ---
 # Recursively fixes ObjectId errors for nested events/deliverables
@@ -58,7 +60,7 @@ def parse_mongo_data(data):
 
 # --- CORE ENDPOINTS ---
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_project(project: ProjectModel = Body(...), current_user: UserModel = Depends(get_current_user)):
     """CREATE: Validate vertical against config and save new project"""
     current_agency_id = current_user.agency_id
@@ -108,11 +110,13 @@ async def create_project(project: ProjectModel = Body(...), current_user: UserMo
     # 4. Save
     new_project = await projects_collection.insert_one(project_data)
     
+    logger.info(f"Project created", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical']}})
+    
     # Return the clean object
     project_data["_id"] = str(new_project.inserted_id)
     return parse_mongo_data(project_data)
 
-@router.get("/")
+@router.get("")
 async def list_projects(
     vertical: str = None, 
     search: str = None,
@@ -157,7 +161,8 @@ async def list_projects(
         # Security check: if view='completed' but user requests status='production', returns empty
         if view == "completed" and status.lower() not in ["completed"]:
              query["status"] = "IMPOSSIBLE_MATCH"
-        if view == "ongoing" and status.lower() not in ["enquiry", "production"]:
+        if view == "ongoing" and status.lower() not in ["enquiry", "production", "ongoing"]:
+             # Allow 'ongoing' in ongoing view
              query["status"] = "IMPOSSIBLE_MATCH"
 
     elif base_status_filter:
@@ -213,9 +218,13 @@ async def list_projects(
         sort_order = -1 if sort == "newest" else 1 # 1 is oldest (ascending date)
         
         # Careful: sort argument must be valid.
+        logger.debug(f"List projects query", extra={"data": {"query": str(query), "sort": sort, "skip": skip, "limit": limit}})
+
         cursor = projects_collection.find(query).sort("created_on", sort_order).skip(skip).limit(limit)
         paginated_data = await cursor.to_list(length=limit)
         total = await projects_collection.count_documents(query)
+        
+        logger.debug(f"List projects result", extra={"data": {"returned": len(paginated_data), "total": total}})
     
     # 3. Enrich with Task Stats (Progress)
     if paginated_data:
@@ -248,11 +257,11 @@ async def list_projects(
             pid = str(project["_id"])
             if pid in stats_map:
                 s = stats_map[pid]
-                total = s["total_tasks"]
+                task_total = s["total_tasks"]
                 completed = s["completed_tasks"]
-                percentage = int((completed / total) * 100) if total > 0 else 0
+                percentage = int((completed / task_total) * 100) if task_total > 0 else 0
                 project["stats"] = {
-                    "total_tasks": total,
+                    "total_tasks": task_total,
                     "completed_tasks": completed,
                     "percentage": percentage
                 }
@@ -292,8 +301,10 @@ async def delete_project(id: str, current_user: UserModel = Depends(get_current_
     result = await projects_collection.delete_one({"_id": ObjectId(id), "agency_id": current_agency_id})
     
     if result.deleted_count == 0:
+        logger.warning(f"Delete project failed: not found", extra={"data": {"project_id": id}})
         raise HTTPException(status_code=404, detail="Project not found")
     
+    logger.info(f"Project deleted", extra={"data": {"project_id": id}})
     return {"message": "Project and associated tasks deleted successfully"}
 
 @router.delete("/{project_id}/events/{event_id}")
@@ -423,7 +434,7 @@ async def add_event_to_project(project_id: str, event: EventModel = Body(...), c
             
         if new_tasks:
             await tasks_collection.insert_many(new_tasks)
-            print(f"✅ Created {len(new_tasks)} tasks from deliverables for event {event.type}")
+            logger.info(f"Created tasks from deliverables", extra={"data": {"count": len(new_tasks), "event_type": event.type, "project_id": project_id}})
 
     return {"message": "Event added successfully"}
 
@@ -447,8 +458,10 @@ async def update_project(project_id: str, update_data: dict = Body(...), current
     )
 
     if result.matched_count == 0:
+        logger.warning(f"Update project failed: not found", extra={"data": {"project_id": project_id}})
         raise HTTPException(status_code=404, detail="Project not found")
 
+    logger.info(f"Project updated", extra={"data": {"project_id": project_id, "fields": list(update_data.keys())}})
     return {"message": "Project updated successfully"}
 
 @router.patch("/{project_id}/events/{event_id}")

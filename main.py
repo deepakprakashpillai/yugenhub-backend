@@ -1,6 +1,15 @@
+from logging_config import setup_logging
+
+# Initialize logging BEFORE anything else
+setup_logging()
+
+from logging_config import get_logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from middleware import RequestLifecycleMiddleware
 from routes import associate, client, config, project, tasks, auth, calendar, notifications, users, dashboard
+
+logger = get_logger("app")
 
 app = FastAPI(title="YugenHub API")
 
@@ -13,6 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request lifecycle middleware (request ID, context vars, duration logging)
+app.add_middleware(RequestLifecycleMiddleware)
+
 # REGISTER ROUTERS
 app.include_router(auth.router)
 app.include_router(project.router)
@@ -24,6 +36,8 @@ app.include_router(calendar.router)
 app.include_router(notifications.router)
 app.include_router(users.router)
 app.include_router(dashboard.router)
+
+logger.info("All routers registered, YugenHub API ready")
 
 @app.get("/")
 async def root():

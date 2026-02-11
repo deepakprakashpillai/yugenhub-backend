@@ -4,10 +4,12 @@ from datetime import datetime, timedelta
 from database import projects_collection, tasks_collection, associates_collection
 from models.user import UserModel
 from routes.deps import get_current_user
+from logging_config import get_logger
 
 router = APIRouter(prefix="/api/calendar", tags=["Calendar"])
+logger = get_logger("calendar")
 
-@router.get("/")
+@router.get("")
 async def get_calendar_events(
     start: str = Query(..., description="Start date (YYYY-MM-DD)"),
     end: str = Query(..., description="End date (YYYY-MM-DD)"),
@@ -159,5 +161,6 @@ async def get_calendar_events(
     # Sort by date
     calendar_items.sort(key=lambda x: x["date"])
 
+    logger.debug(f"Calendar query completed", extra={"data": {"start": start, "end": end, "type": type, "items_returned": len(calendar_items)}})
     return calendar_items
 
