@@ -24,6 +24,10 @@ class AgencyConfigModel(BaseModel):
     org_email: Optional[str] = ""
     org_phone: Optional[str] = ""
 
+    # Theme config
+    theme_mode: Optional[str] = "dark"  # light, dark, system
+    accent_color: Optional[str] = "#ef4444"  # Default red-500
+
     # Workflow config
     status_options: List[Dict[str, str]] = []
     lead_sources: List[str] = []

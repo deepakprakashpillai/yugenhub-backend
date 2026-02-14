@@ -69,6 +69,8 @@ async def get_org(current_user: UserModel = Depends(get_current_user), db: Scope
         "org_email": config.get("org_email", ""),
         "org_phone": config.get("org_phone", ""),
         "agency_id": config.get("agency_id"),
+        "theme_mode": config.get("theme_mode", "dark"),
+        "accent_color": config.get("accent_color", "#ef4444"),
     })
 
 
@@ -79,7 +81,7 @@ async def update_org(
     db: ScopedDatabase = Depends(get_db)
 ):
     """Update organisation details. Owner only."""
-    allowed_fields = {"org_name", "org_email", "org_phone"}
+    allowed_fields = {"org_name", "org_email", "org_phone", "theme_mode", "accent_color"}
     filtered = {k: v for k, v in updates.items() if k in allowed_fields}
 
     if not filtered:
