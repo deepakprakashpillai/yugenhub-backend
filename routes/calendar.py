@@ -1,9 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Optional
 from datetime import datetime, timedelta
-from database import projects_collection, tasks_collection, associates_collection
+# REMOVED raw collection imports
 from models.user import UserModel
-from routes.deps import get_current_user
+from routes.deps import get_current_user, get_db
+from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 
 router = APIRouter(prefix="/api/calendar", tags=["Calendar"])
@@ -15,7 +16,8 @@ async def get_calendar_events(
     end: str = Query(..., description="End date (YYYY-MM-DD)"),
     type: Optional[str] = Query(None, description="Filter by type: 'event', 'task', or None for both"),
     assigned_only: bool = Query(False, description="Show only items assigned to the current user"),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """
     Get all calendar items (Project Events + Task Due Dates) within a date range.
@@ -24,7 +26,7 @@ async def get_calendar_events(
     - type: 'event' (shoots only), 'task' (deliverables only), or None (both)
     - assigned_only: If true, shows only items assigned to the current user
     """
-    current_agency_id = current_user.agency_id
+    # current_agency_id handled by db wrapper
     calendar_items = []
 
     # Parse dates
@@ -40,9 +42,8 @@ async def get_calendar_events(
     user_associate_id = None
     if assigned_only:
         # Find associate with matching email
-        associate = await associates_collection.find_one({
-            "email_id": current_user.email,
-            "agency_id": current_agency_id
+        associate = await db.associates.find_one({
+            "email_id": current_user.email
         })
         if associate:
             user_associate_id = str(associate["_id"])
@@ -50,8 +51,7 @@ async def get_calendar_events(
     # 1. FETCH PROJECT EVENTS (Shoots, Meetings, etc.)
     if type != "task":  # Skip if only tasks requested
         # Find projects that have at least one event in the range
-        projects_cursor = projects_collection.find({
-            "agency_id": current_agency_id,
+        projects_cursor = db.projects.find({
             "events": {"$ne": []} 
         })
         
@@ -105,8 +105,9 @@ async def get_calendar_events(
                 })
 
     # 2. FETCH TASKS (Deliverables + General Tasks with Due Dates)
+    # 2. FETCH TASKS (Deliverables + General Tasks with Due Dates)
     if type != "event":  # Skip if only events requested
-        task_query = {"studio_id": current_agency_id}
+        task_query = {} # ScopedDB adds agency/studio filter implicitly
         
         # ASSIGNED_ONLY FILTER for tasks
         # RBAC: Members can ONLY see their own tasks
@@ -117,7 +118,7 @@ async def get_calendar_events(
             task_query["assigned_to"] = current_user.id
         
         # Fetch all tasks (filtering date in Python due to mixed data types: String vs Date)
-        tasks_cursor = tasks_collection.find(task_query)
+        tasks_cursor = db.tasks.find(task_query)
 
         async for task in tasks_cursor:
             due_date = task.get("due_date")

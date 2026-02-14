@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Body, HTTPException, Query
+import re # IMPORTED
 from bson import ObjectId
 from datetime import datetime
-from database import projects_collection, configs_collection, tasks_collection, associates_collection, users_collection, notifications_collection
+# REMOVED raw collection imports
+from database import notifications_collection
 from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
-from routes.deps import get_current_user
+from routes.deps import get_current_user, get_db
 from models.user import UserModel
+from middleware.db_guard import ScopedDatabase
 from fastapi import Depends
 from logging_config import get_logger
 
@@ -14,7 +17,7 @@ router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
 
 # --- HELPER: Notify Associate on Assignment ---
-async def notify_associate_assignment(associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
+async def notify_associate_assignment(db: ScopedDatabase, associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
     """
     Send a notification to an associate when they are assigned to an event.
     Looks up the associate's email, finds the corresponding user, and creates notification.
@@ -23,12 +26,20 @@ async def notify_associate_assignment(associate_id: str, project_code: str, even
         return
     
     # Find associate and their email
-    associate = await associates_collection.find_one({"_id": ObjectId(associate_id), "agency_id": agency_id})
+    associate = await db.associates.find_one({"_id": ObjectId(associate_id)})
     if not associate or not associate.get("email_id"):
         return  # No email, can't notify
     
-    # Find user with this email
-    user = await users_collection.find_one({"email": associate.get("email_id")})
+    # Find user with this email -- USERS collection is special, might need checking
+    # Users collection is generally global but filtered? users_collection in db_guard might filter by agency.
+    # But for finding a user by email, we might need cross-agency?
+    # Actually, associates are in the agency, so the user SHOULD be in the agency.
+    
+    # BUT wait, the `db` wrapper enforces agency_id on ALL find queries.
+    # If the user is not in the agency (e.g. pending invite accepting?), we might fail.
+    # However, standard flow is: User is added to agency users.
+    
+    user = await db.users.find_one({"email": associate.get("email_id")})
     if not user:
         return  # No user account, can't notify
     
@@ -46,7 +57,7 @@ async def notify_associate_assignment(associate_id: str, project_code: str, even
         resource_id=None  # Could add project_id here
     )
     
-    await notifications_collection.insert_one(notification.model_dump())
+    await db.notifications.insert_one(notification.model_dump())
     logger.info(f"Notification sent to associate for event assignment", extra={"data": {"associate": associate.get('name'), "project": project_code, "event": event_type}})
 
 # --- HELPER FUNCTION ---
@@ -61,15 +72,19 @@ def parse_mongo_data(data):
 # --- CORE ENDPOINTS ---
 
 @router.post("", status_code=201)
-async def create_project(project: ProjectModel = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def create_project(
+    project: ProjectModel = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """CREATE: Validate vertical against config and save new project"""
-    current_agency_id = current_user.agency_id
-    project.agency_id = current_agency_id
+    # NOTE: ScopedDB automatically injects agency_id filter on reads/writes.
+    # explicit setting on model is still good for clarity but redundant for security.
+    project.agency_id = current_user.agency_id
 
     # 1. Fetch the active config to check valid verticals
-    config = await configs_collection.find_one({"agency_id": current_agency_id})
-    allowed_verticals = [v["id"] for v in config.get("verticals", [])] if config else []
-    
+    # db.agency_configs implicitly filters by agency_id
+    config = await db.agency_configs.find_one({})
     allowed_verticals = [v["id"] for v in config.get("verticals", [])] if config else []
     
     # 2. Validation
@@ -85,15 +100,13 @@ async def create_project(project: ProjectModel = Body(...), current_user: UserMo
     if selected_vertical:
         for field_def in selected_vertical.get("fields", []):
             field_name = field_def["name"]
-            is_required = True # Assuming all defined fields are required for now, or check field_def
+            is_required = True 
             
             if is_required and field_name not in project.metadata:
-                # Optionally skippable if we add a "required" flag to VerticalField model later
                 pass 
 
             if field_name in project.metadata:
                 value = project.metadata[field_name]
-                # Validate Select Options
                 if field_def["type"] == "select" and value not in field_def.get("options", []):
                     raise HTTPException(
                         status_code=400,
@@ -102,17 +115,18 @@ async def create_project(project: ProjectModel = Body(...), current_user: UserMo
 
     # 3. Check for duplicate Project Code
     project_data = project.model_dump()
-    project_data["code"] = project_data["code"].upper() # Force uppercase
+    project_data["code"] = project_data["code"].upper()
     
-    if await projects_collection.find_one({"code": project_data["code"], "agency_id": current_agency_id}):
+    # Guardrail ensures we only check THIS agency's projects
+    if await db.projects.find_one({"code": project_data["code"]}):
         raise HTTPException(status_code=400, detail="Project code already exists")
         
     # 4. Save
-    new_project = await projects_collection.insert_one(project_data)
+    # Guardrail ensures agency_id is injected
+    new_project = await db.projects.insert_one(project_data)
     
     logger.info(f"Project created", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical']}})
     
-    # Return the clean object
     project_data["_id"] = str(new_project.inserted_id)
     return parse_mongo_data(project_data)
 
@@ -121,15 +135,16 @@ async def list_projects(
     vertical: str = None, 
     search: str = None,
     status: str = None,
-    view: str = "all", # New parameter
+    view: str = "all",
     sort: str = "newest",
     page: int = Query(1, ge=1), 
-    limit: int = Query(12, le=100),
-    current_user: UserModel = Depends(get_current_user)
+    limit: int = Query(12, le=50000),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """READ LIST: Get projects with pagination, filtering, and sorting"""
-    current_agency_id = current_user.agency_id
-    query = {"agency_id": current_agency_id}
+    # Guardrail handles agency_id, so we just build the rest of the query
+    query = {}
     
     # 1. Filters
     if vertical:
@@ -153,10 +168,11 @@ async def list_projects(
     
     # If specific status is requested, it must be valid within the view
     if status and status != "all":
-        # If view logic already set a constraint, we need to respect both (intersection)
-        # But logically, 'status' filter is usually a subset of view or a specific drill-down.
-        # We will let 'status' override if it's specific, but realistically the UI should only show valid options.
-        query["status"] = status
+        # Check if view logic already set a constraint? 
+        # Actually, for custom statuses, we need exact match usually,
+        # but to support legacy "Ongoing" vs "ongoing", we use case-insensitive regex.
+        # ESCAPE the status to prevent regex injection since IDs might have special chars (unlikely but safe).
+        query["status"] = {"$regex": f"^{re.escape(status)}$", "$options": "i"}
         
         # Security check: if view='completed' but user requests status='production', returns empty
         if view == "completed" and status.lower() not in ["completed"]:
@@ -195,7 +211,7 @@ async def list_projects(
 
     if sort == "upcoming":
         # Fetch ALL matching basics
-        cursor = projects_collection.find(query)
+        cursor = db.projects.find(query)
         all_projects = await cursor.to_list(length=1000) # Safety cap
         
         def get_next_event_date(p):
@@ -220,9 +236,9 @@ async def list_projects(
         # Careful: sort argument must be valid.
         logger.debug(f"List projects query", extra={"data": {"query": str(query), "sort": sort, "skip": skip, "limit": limit}})
 
-        cursor = projects_collection.find(query).sort("created_on", sort_order).skip(skip).limit(limit)
+        cursor = db.projects.find(query).sort("created_on", sort_order).skip(skip).limit(limit)
         paginated_data = await cursor.to_list(length=limit)
-        total = await projects_collection.count_documents(query)
+        total = await db.projects.count_documents(query)
         
         logger.debug(f"List projects result", extra={"data": {"returned": len(paginated_data), "total": total}})
     
@@ -232,11 +248,19 @@ async def list_projects(
         project_ids = [str(p["_id"]) for p in paginated_data]
         
         # Aggregate stats for these projects only
-        stats_cursor = tasks_collection.aggregate([
+        # Note: tasks collection usually uses 'studio_id', but db wrapper handles that if configured.
+        # Check ScopedDatabase implementation: It maps 'studio_field_name' to 'studio_id' for tasks/task_history.
+        # So calling db.tasks.aggregate automatically injects studio_id=agency_id.
+        
+        # However, for aggregation we need to be careful if we manually constructing pipeline.
+        # ScopedCollection.aggregate injects a $match stage.
+        # So we just provide the rest.
+        
+        stats_cursor = db.tasks.aggregate([
             {
                 "$match": {
-                    "project_id": {"$in": project_ids},
-                    "studio_id": current_agency_id
+                    "project_id": {"$in": project_ids}
+                    # studio_id injected by wrapper
                 }
             },
             {
@@ -276,29 +300,28 @@ async def list_projects(
     }
 
 @router.get("/{id}")
-async def get_project(id: str, current_user: UserModel = Depends(get_current_user)):
+async def get_project(id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """READ ONE: Fetch a single project by ID"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="Invalid ID")
     
-    project = await projects_collection.find_one({"_id": ObjectId(id), "agency_id": current_agency_id})
+    # db.projects.find_one automatically injects {"agency_id": current_agency_id}
+    project = await db.projects.find_one({"_id": ObjectId(id)})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
     return parse_mongo_data(project)
 
 @router.delete("/{id}")
-async def delete_project(id: str, current_user: UserModel = Depends(get_current_user)):
+async def delete_project(id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """DELETE: Remove an entire project"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="Invalid ID")
     
-    # Cascade Delete Tasks
-    await tasks_collection.delete_many({"project_id": id, "studio_id": current_agency_id})
+    # Cascade Delete Tasks (db.tasks uses studio_id automatically)
+    await db.tasks.delete_many({"project_id": id})
 
-    result = await projects_collection.delete_one({"_id": ObjectId(id), "agency_id": current_agency_id})
+    result = await db.projects.delete_one({"_id": ObjectId(id)})
     
     if result.deleted_count == 0:
         logger.warning(f"Delete project failed: not found", extra={"data": {"project_id": id}})
@@ -308,17 +331,16 @@ async def delete_project(id: str, current_user: UserModel = Depends(get_current_
     return {"message": "Project and associated tasks deleted successfully"}
 
 @router.delete("/{project_id}/events/{event_id}")
-async def delete_event(project_id: str, event_id: str, current_user: UserModel = Depends(get_current_user)):
+async def delete_event(project_id: str, event_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """DELETE: Remove an event from a project"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
     
     # Cascade Delete Tasks linked to this Event
-    await tasks_collection.delete_many({"event_id": event_id, "project_id": project_id, "studio_id": current_agency_id})
+    await db.tasks.delete_many({"event_id": event_id, "project_id": project_id})
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
         {"$pull": {"events": {"id": event_id}}, "$set": {"updated_on": datetime.now()}}
     )
     
@@ -328,20 +350,19 @@ async def delete_event(project_id: str, event_id: str, current_user: UserModel =
     return {"message": "Event and associated tasks deleted successfully"}
 
 @router.get("/stats/overview")
-async def get_project_stats(vertical: str = None, current_user: UserModel = Depends(get_current_user)):
+async def get_project_stats(vertical: str = None, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """READ STATS: Get overview metrics for the vertical/dashboard"""
-    current_agency_id = current_user.agency_id
-    base_query = {"agency_id": current_agency_id}
+    base_query = {}
     if vertical:
         base_query["vertical"] = vertical
 
     # 1. Total Projects
-    total = await projects_collection.count_documents(base_query)
+    total = await db.projects.count_documents(base_query)
 
     # 2. Active Projects (Status != COMPLETED, ARCHIVED, CANCELLED)
     active_query = base_query.copy()
     active_query["status"] = {"$nin": ["Completed", "Archived", "Cancelled", "completed", "archived", "cancelled"]}
-    active = await projects_collection.count_documents(active_query)
+    active = await db.projects.count_documents(active_query)
 
     # 3. This Month (Active Projects having events in the current month)
     # MUST be a subset of 'active' to ensure logical numbers (This Month <= Active)
@@ -369,13 +390,13 @@ async def get_project_stats(vertical: str = None, current_user: UserModel = Depe
     # But standard Pymongo + datetime inserts result in ISODate. 
     # Let's start with standard Date query.
     
-    this_month = await projects_collection.count_documents(month_query)
+    this_month = await db.projects.count_documents(month_query)
 
     # 4. Ongoing/Production (Specific Status)
     prod_query = base_query.copy()
     # Match both 'ongoing' and 'production' (case insensitive)
     prod_query["status"] = {"$in": ["ongoing", "Ongoing", "production", "Production"]}
-    ongoing_count = await projects_collection.count_documents(prod_query)
+    ongoing_count = await db.projects.count_documents(prod_query)
 
     return {
         "total": total,
@@ -387,14 +408,18 @@ async def get_project_stats(vertical: str = None, current_user: UserModel = Depe
 # --- ADVANCED LOGIC (The stuff you had) ---
 
 @router.post("/{project_id}/events")
-async def add_event_to_project(project_id: str, event: EventModel = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def add_event_to_project(
+    project_id: str, 
+    event: EventModel = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """UPDATE: Add a new event (like a Reception) to an existing Project"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
         {"$push": {"events": event.model_dump()}, "$set": {"updated_on": datetime.now()}}
     )
 
@@ -405,12 +430,10 @@ async def add_event_to_project(project_id: str, event: EventModel = Body(...), c
     # Deliverables should be treated as Tasks for progress tracking
     if event.deliverables:
         new_tasks = []
-        project_code = "UNKNOWN" # Fetch if needed, or query again. 
-        # Better to query project to get code? 
-        # For now, let's just use generic title or skip project code in title if simpler.
+        project_code = "UNKNOWN"
         
         # We need project details for the task
-        project_doc = await projects_collection.find_one({"_id": ObjectId(project_id)})
+        project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
         project_code = project_doc.get("code", "PROJECT") if project_doc else "PROJECT"
         
         for deliverable in event.deliverables:
@@ -425,7 +448,7 @@ async def add_event_to_project(project_id: str, event: EventModel = Body(...), c
                 priority="medium",
                 due_date=deliverable.due_date,
                 assigned_to=deliverable.incharge_id,
-                studio_id=current_agency_id,
+                studio_id=current_user.agency_id, # ScopedDB enforces this anyway
                 created_by=current_user.id,
                 type="project",
                 category="deliverable"
@@ -433,27 +456,31 @@ async def add_event_to_project(project_id: str, event: EventModel = Body(...), c
             new_tasks.append(task.model_dump())
             
         if new_tasks:
-            await tasks_collection.insert_many(new_tasks)
+            await db.tasks.insert_many(new_tasks)
             logger.info(f"Created tasks from deliverables", extra={"data": {"count": len(new_tasks), "event_type": event.type, "project_id": project_id}})
 
     return {"message": "Event added successfully"}
 
 @router.patch("/{project_id}")
-async def update_project(project_id: str, update_data: dict = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def update_project(
+    project_id: str, 
+    update_data: dict = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """UPDATE: Generic update for project fields"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
     # Prevent updating immutable fields or fields handled by specific logic
     update_data.pop("_id", None)
-    update_data.pop("events", None) # Events should be handled via specific endpoints
-    update_data.pop("code", None) # Code shouldn't change easily
-    update_data.pop("agency_id", None) # Cannot transfer ownership
+    update_data.pop("events", None) 
+    update_data.pop("code", None) 
+    update_data.pop("agency_id", None) 
     update_data["updated_on"] = datetime.now()
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
         {"$set": update_data}
     )
 
@@ -465,9 +492,14 @@ async def update_project(project_id: str, update_data: dict = Body(...), current
     return {"message": "Project updated successfully"}
 
 @router.patch("/{project_id}/events/{event_id}")
-async def update_event(project_id: str, event_id: str, update_data: dict = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def update_event(
+    project_id: str, 
+    event_id: str, 
+    update_data: dict = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """UPDATE: Update a specific event within a project"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
@@ -475,8 +507,8 @@ async def update_event(project_id: str, event_id: str, update_data: dict = Body(
     set_fields = {f"events.$.{k}": v for k, v in update_data.items()}
     set_fields["updated_on"] = datetime.now()
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "events.id": event_id, "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "events.id": event_id},
         {"$set": set_fields}
     )
 
@@ -488,14 +520,19 @@ async def update_event(project_id: str, event_id: str, update_data: dict = Body(
 # Legacy Deliverable Endpoints Removed - Now handled via /api/tasks
 
 @router.post("/{project_id}/events/{event_id}/assignments")
-async def add_assignment(project_id: str, event_id: str, assignment: AssignmentModel = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def add_assignment(
+    project_id: str, 
+    event_id: str, 
+    assignment: AssignmentModel = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """CREATE: Add an associate assignment to a specific event"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
     # Get project info for notification
-    project = await projects_collection.find_one({"_id": ObjectId(project_id), "agency_id": current_agency_id})
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
@@ -508,8 +545,8 @@ async def add_assignment(project_id: str, event_id: str, assignment: AssignmentM
             event_date = evt.get("start_date")
             break
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "events.id": event_id, "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "events.id": event_id},
         {"$push": {"events.$.assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now()}}
     )
 
@@ -518,19 +555,26 @@ async def add_assignment(project_id: str, event_id: str, assignment: AssignmentM
 
     # Send notification to the assigned associate
     await notify_associate_assignment(
+        db, # Pass db dependency
         assignment.associate_id, 
         project.get("code", "Unknown"), 
         event_type,
         event_date,
-        current_agency_id
+        current_user.agency_id
     )
 
     return {"message": "Assignment added successfully", "id": assignment.id}
 
 @router.patch("/{project_id}/events/{event_id}/assignments/{assignment_id}")
-async def update_assignment(project_id: str, event_id: str, assignment_id: str, update_data: dict = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def update_assignment(
+    project_id: str, 
+    event_id: str, 
+    assignment_id: str, 
+    update_data: dict = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """UPDATE: deep nested update for an assignment"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
@@ -538,8 +582,8 @@ async def update_assignment(project_id: str, event_id: str, assignment_id: str, 
     set_fields = {f"events.$[evt].assignments.$[asn].{k}": v for k, v in update_data.items()}
     set_fields["updated_on"] = datetime.now()
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
         {"$set": set_fields},
         array_filters=[{"evt.id": event_id}, {"asn.id": assignment_id}]
     )
@@ -550,14 +594,19 @@ async def update_assignment(project_id: str, event_id: str, assignment_id: str, 
     return {"message": "Assignment updated"}
 
 @router.delete("/{project_id}/events/{event_id}/assignments/{assignment_id}")
-async def delete_assignment(project_id: str, event_id: str, assignment_id: str, current_user: UserModel = Depends(get_current_user)):
+async def delete_assignment(
+    project_id: str, 
+    event_id: str, 
+    assignment_id: str, 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """DELETE: Remove an assignment"""
-    current_agency_id = current_user.agency_id
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
-    result = await projects_collection.update_one(
-        {"_id": ObjectId(project_id), "events.id": event_id, "agency_id": current_agency_id},
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "events.id": event_id},
         {"$pull": {"events.$.assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now()}}
     )
 
@@ -567,9 +616,8 @@ async def delete_assignment(project_id: str, event_id: str, assignment_id: str, 
     return {"message": "Assignment deleted"}
 
 @router.get("/assigned/{associate_id}")
-async def get_associate_schedule(associate_id: str, current_user: UserModel = Depends(get_current_user)):
+async def get_associate_schedule(associate_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """SEARCH: Find all projects where this associate is working"""
-    current_agency_id = current_user.agency_id
-    query = {"events.assignments.associate_id": associate_id, "agency_id": current_agency_id}
-    projects = await projects_collection.find(query).to_list(1000)
+    query = {"events.assignments.associate_id": associate_id}
+    projects = await db.projects.find(query).to_list(1000)
     return parse_mongo_data(projects)

@@ -9,6 +9,7 @@ class UserModel(BaseModel):
     email: EmailStr
     name: str
     picture: Optional[str] = None
+    phone: Optional[str] = None
     agency_id: str
     role: Literal['owner', 'admin', 'member'] = "owner"
     created_at: datetime = Field(default_factory=datetime.now)

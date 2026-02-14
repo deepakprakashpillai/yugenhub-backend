@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
-from database import notifications_collection
 from models.notification import NotificationModel
 from models.user import UserModel
-from routes.deps import get_current_user
+from routes.deps import get_current_user, get_db
+from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 
 router = APIRouter(prefix="/api/notifications", tags=["Notifications"])
@@ -23,21 +23,29 @@ def parse_mongo_data(data):
 @router.get("", response_model=List[dict])
 async def get_notifications(
     unread_only: bool = False,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """Get all notifications for the current user."""
+    # ScopedDB enforces agency_id automatically.
+    # Notifications are user-specific, but also agency-scoped to prevent leaks if user moves (rare but safe)
+    # Actually, if user moves agency, they shouldn't see old agency notifications. ScopedDB handles this.
+    
     query = {"user_id": current_user.id}
     if unread_only:
         query["read"] = False
     
-    notifications = await notifications_collection.find(query).sort("created_at", -1).to_list(50)
+    notifications = await db.notifications.find(query).sort("created_at", -1).to_list(50)
     return parse_mongo_data(notifications)
 
 
 @router.get("/unread-count")
-async def get_unread_count(current_user: UserModel = Depends(get_current_user)):
+async def get_unread_count(
+    current_user: UserModel = Depends(get_current_user), 
+    db: ScopedDatabase = Depends(get_db)
+):
     """Get count of unread notifications."""
-    count = await notifications_collection.count_documents({
+    count = await db.notifications.count_documents({
         "user_id": current_user.id,
         "read": False
     })
@@ -47,10 +55,11 @@ async def get_unread_count(current_user: UserModel = Depends(get_current_user)):
 @router.patch("/{notification_id}/read")
 async def mark_as_read(
     notification_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """Mark a notification as read."""
-    result = await notifications_collection.update_one(
+    result = await db.notifications.update_one(
         {"id": notification_id, "user_id": current_user.id},
         {"$set": {"read": True}}
     )
@@ -61,9 +70,12 @@ async def mark_as_read(
 
 
 @router.post("/mark-all-read")
-async def mark_all_read(current_user: UserModel = Depends(get_current_user)):
+async def mark_all_read(
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     """Mark all notifications as read for the current user."""
-    await notifications_collection.update_many(
+    await db.notifications.update_many(
         {"user_id": current_user.id, "read": False},
         {"$set": {"read": True}}
     )

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Body, HTTPException, Depends
 from google.oauth2 import id_token
 from google.auth.transport import requests
-from database import users_collection, configs_collection
+from database import users_collection 
 from models.user import UserModel
 from routes.deps import create_access_token
 from datetime import datetime

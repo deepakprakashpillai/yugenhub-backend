@@ -11,6 +11,7 @@ class TaskHistoryModel(BaseModel):
     old_value: Optional[Any] = None
     new_value: Optional[Any] = None
     comment: Optional[str] = None
+    studio_id: str # Added for direct agency filtering
     timestamp: datetime = Field(default_factory=datetime.now)
 
     model_config = ConfigDict(populate_by_name=True)

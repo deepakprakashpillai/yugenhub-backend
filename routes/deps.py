@@ -52,3 +52,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
         
     return UserModel(**user)
+
+from middleware.db_guard import ScopedDatabase
+from database import db as raw_db
+
+async def get_db(current_user: UserModel = Depends(get_current_user)) -> ScopedDatabase:
+    """Returns a database wrapper that enforces agency_id scoping."""
+    return ScopedDatabase(raw_db, current_user.agency_id)

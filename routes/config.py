@@ -1,10 +1,9 @@
-from fastapi import APIRouter, Body, HTTPException
-from database import configs_collection
+from fastapi import APIRouter, Body, HTTPException, Depends
+# REMOVED raw collection imports
 from models.config import AgencyConfigModel
-from routes.deps import get_current_user
+from routes.deps import get_current_user, get_db
 from models.user import UserModel
-from fastapi import Depends
-from database import configs_collection
+from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 
 # Helper function to parse MongoDB data, assuming it handles _id conversion
@@ -19,21 +18,26 @@ router = APIRouter(prefix="/api/config", tags=["Configuration"])
 logger = get_logger("config")
 
 @router.get("")
-async def get_config(current_user: UserModel = Depends(get_current_user)):
-    current_agency_id = current_user.agency_id
-    config = await configs_collection.find_one({"agency_id": current_agency_id})
+async def get_config(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
+    # ScopedDB automatically filters by agency_id
+    config = await db.agency_configs.find_one({})
     if not config:
-        return {"agency_id": current_agency_id, "verticals": []} # Return empty default
+        return {"agency_id": current_user.agency_id, "verticals": []} # Return empty default
     return parse_mongo_data(config)
 
 @router.post("/init")
-async def initialize_config(config: AgencyConfigModel = Body(...), current_user: UserModel = Depends(get_current_user)):
+async def initialize_config(
+    config: AgencyConfigModel = Body(...), 
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
     # Override agency_id with user's specific agency
     current_agency_id = current_user.agency_id
     config.agency_id = current_agency_id
     
-    await configs_collection.update_one(
-        {"agency_id": current_agency_id},
+    # ScopedDB injection works on update too
+    await db.agency_configs.update_one(
+        {},
         {"$set": config.model_dump()},
         upsert=True
     )

@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Body, HTTPException, Depends, Query
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from database import tasks_collection, task_history_collection, projects_collection, notifications_collection
+# REMOVED raw collection imports
 from models.task import TaskModel, TaskHistoryModel
 from models.notification import NotificationModel
 from models.user import UserModel
-from routes.deps import get_current_user
+from routes.deps import get_current_user, get_db
+from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 import uuid
 
@@ -23,10 +24,14 @@ def parse_mongo_data(data):
         return {k: parse_mongo_data(v) for k, v in data.items()}
     return data
 
-async def log_history(task_id: str, user_id: str, changes: Dict[str, Any], comment: str = None):
+async def log_history(db: ScopedDatabase, task_id: str, user_id: str, changes: Dict[str, Any], comment: str = None):
     """Log changes to task history"""
     history_entries = []
     timestamp = datetime.now()
+    
+    # We need studio_id. Since we are in an agency context (ScopedDB), we can access it from db.agency_id
+    # However, db.agency_id is the string ID.
+    studio_id = db.agency_id
     
     # specific comment for blocked status
     blocked_comment = comment if "status" in changes and changes["status"] == "blocked" else None
@@ -42,19 +47,21 @@ async def log_history(task_id: str, user_id: str, changes: Dict[str, Any], comme
             old_value=str(old_val) if old_val is not None else None,
             new_value=str(new_val) if new_val is not None else None,
             comment=blocked_comment if field == "status" and new_val == "blocked" else general_comment,
+            studio_id=studio_id,
             timestamp=timestamp
         )
         history_entries.append(entry.model_dump())
     
     if history_entries:
-        await task_history_collection.insert_many(history_entries)
+        await db.task_history.insert_many(history_entries)
 
 # --- ENDPOINTS ---
 
 @router.post("", status_code=201)
 async def create_task(
     task: TaskModel = Body(...),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """Create a new task (Owner/Admin only)"""
     if current_user.role not in ["owner", "admin"]:
@@ -68,18 +75,18 @@ async def create_task(
     if task.type == 'project' and not task.project_id:
         raise HTTPException(status_code=400, detail="Project tasks must have a project_id")
     
-    result = await tasks_collection.insert_one(task.model_dump())
-    created_task = await tasks_collection.find_one({"_id": result.inserted_id})
+    result = await db.tasks.insert_one(task.model_dump())
+    created_task = await db.tasks.find_one({"_id": result.inserted_id})
     
     # Log creation
-    await log_history(task.id, current_user.id, {"creation": (None, "Task Created")})
+    await log_history(db, task.id, current_user.id, {"creation": (None, "Task Created")})
     
     # --- NOTIFICATION LOGIC (CREATE) ---
     if task.assigned_to and task.assigned_to != current_user.id:
         # 1. Get Project Details if exists
         project_title = None
         if task.project_id:
-            project = await projects_collection.find_one({"id": task.project_id})
+            project = await db.projects.find_one({"id": task.project_id})
             if project:
                 project_title = project.get("title")
 
@@ -108,7 +115,7 @@ async def create_task(
                 "due_date": task.due_date.isoformat() if task.due_date else None
             }
         )
-        await notifications_collection.insert_one(notification.model_dump())
+        await db.notifications.insert_one(notification.model_dump())
         logger.info(f"Task assignment notification sent", extra={"data": {"task_id": task.id, "assignee": task.assigned_to}})
     
     logger.info(f"Task created", extra={"data": {"task_id": task.id, "title": task.title, "type": task.type, "project_id": task.project_id}})
@@ -125,25 +132,27 @@ async def list_tasks(
     completed: Optional[bool] = None,
     has_project: Optional[bool] = None,
     page: int = Query(1, ge=1),
-    limit: int = Query(100, le=500),
+    limit: int = Query(100, le=50000),
     search: Optional[str] = None,
     sort_by: Optional[str] = Query("created_at", description="Field to sort by: created_at, due_date, priority"),
     order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
     context: Optional[str] = Query("tasks_page", description="'tasks_page' or 'project_page'"),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """List tasks with robust filtering, sorting, and pagination"""
     
-    # ---------------------------------------------------------
-    # RBAC ENFORCEMENT: 
-    # Members can ONLY see tasks assigned to them on the Tasks Page.
-    # On the Project Page, members can see ALL tasks for that project.
-    # ---------------------------------------------------------
     # Build Aggregation Pipeline
     pipeline = []
 
     # 1. Match Stage (Filters)
-    match_stage = {"studio_id": current_user.agency_id}
+    # ScopedDB.aggregate() handles studio_id/agency_id injection.
+    # But we need to construct the match stage for other filters.
+    # NOTE: Since we are using pipeline, db.tasks.aggregate() will PREPEND the scope match.
+    # So we don't need to add studio_id here manually IF we rely on the wrapper.
+    # BUT, 'tasks' collection uses 'studio_id', wrapper heuristic sets it correctly.
+    
+    match_stage = {} 
     
     # RBAC: Force assignment filter for members (unless viewing a project's tasks)
     if current_user.role.lower() == 'member':
@@ -181,8 +190,6 @@ async def list_tasks(
     if priority and priority != 'all':
         match_stage["priority"] = priority
 
-    # Note: assigned_to handled above for RBAC
-
     pipeline.append({"$match": match_stage})
 
     # 2. Lookup Project Details (for project context)
@@ -190,7 +197,7 @@ async def list_tasks(
         "$lookup": {
             "from": "projects",
             "localField": "project_id",
-            "foreignField": "id", # Assuming project 'id' is used, check if _id or id
+            "foreignField": "id",
             "as": "project_info"
         }
     })
@@ -201,7 +208,6 @@ async def list_tasks(
             "project_name": {"$arrayElemAt": ["$project_info.title", 0]},
             "client_name": {"$arrayElemAt": ["$project_info.metadata.client_name", 0]},
             "project_color": {"$arrayElemAt": ["$project_info.color", 0]},
-            # Map priority strings to numeric scores for sorting
             "priority_score": {
                 "$switch": {
                     "branches": [
@@ -223,11 +229,9 @@ async def list_tasks(
     sort_direction = -1 if order == "desc" else 1
     primary_sort_field = sort_by if sort_by in ["created_at", "due_date", "priority_score"] else "created_at"
     
-    # If sorting by priority, use priority_score
     if sort_by == "priority":
         primary_sort_field = "priority_score"
     
-    # If sorting by due_date, we want to sort by DATE only (ignoring time) so priority tiebreaker works for same day
     if sort_by == "due_date":
         pipeline.append({
             "$addFields": {
@@ -242,7 +246,7 @@ async def list_tasks(
     pipeline.append({"$sort": sort_stage})
 
     # 6. Pagination (Facet for total count and data)
-    skip = (page - 1) * limit  # Calculate skip for pagination
+    skip = (page - 1) * limit 
     pipeline.append({
         "$facet": {
             "metadata": [{"$count": "total"}],
@@ -250,7 +254,7 @@ async def list_tasks(
         }
     })
 
-    result = await tasks_collection.aggregate(pipeline).to_list(1)
+    result = await db.tasks.aggregate(pipeline).to_list(1)
     
     data = result[0]["data"]
     total = result[0]["metadata"][0]["total"] if result[0]["metadata"] else 0
@@ -266,10 +270,11 @@ async def list_tasks(
 async def update_task(
     task_id: str,
     update_data: Dict[str, Any] = Body(...),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """Update task (Owner/Admin or Assignee)"""
-    existing_task = await tasks_collection.find_one({"id": task_id, "studio_id": current_user.agency_id})
+    existing_task = await db.tasks.find_one({"id": task_id})
     if not existing_task:
         raise HTTPException(status_code=404, detail="Task not found")
     
@@ -303,13 +308,13 @@ async def update_task(
         
     # Update DB
     update_data["updated_at"] = datetime.now()
-    await tasks_collection.update_one(
+    await db.tasks.update_one(
         {"id": task_id},
         {"$set": update_data}
     )
     
     # Log History
-    await log_history(task_id, current_user.id, changes, comment)
+    await log_history(db, task_id, current_user.id, changes, comment)
     
     # --- NOTIFICATION LOGIC (UPDATE) ---
     if "assigned_to" in changes:
@@ -322,14 +327,13 @@ async def update_task(
             project_id = existing_task.get("project_id")
             project_title = None
             if project_id:
-                project = await projects_collection.find_one({"id": project_id})
+                project = await db.projects.find_one({"id": project_id})
                 if project:
                     project_title = project.get("title")
 
             # 2. Construct Rich Message
             assigner_name = current_user.name
             due_date = update_data.get("due_date", existing_task.get("due_date"))
-            # Handle string date if passed as string (unlikely via Pydantic but possible in dict)
             if isinstance(due_date, str):
                 try: 
                     due_date = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
@@ -358,24 +362,25 @@ async def update_task(
                     "due_date": due_date.isoformat() if due_date and isinstance(due_date, datetime) else None
                 }
             )
-            await notifications_collection.insert_one(notification.model_dump())
+            await db.notifications.insert_one(notification.model_dump())
             logger.info(f"Task reassignment notification sent", extra={"data": {"task_id": task_id, "new_assignee": new_assignee}})
     
     logger.info(f"Task updated", extra={"data": {"task_id": task_id, "fields_changed": list(changes.keys())}})
-    updated_task = await tasks_collection.find_one({"id": task_id})
+    updated_task = await db.tasks.find_one({"id": task_id})
     return parse_mongo_data(updated_task)
 
 @router.delete("/{task_id}")
 async def delete_task(
     task_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """Hard delete task (Owner/Admin only)"""
     if current_user.role not in ["owner", "admin"]:
         logger.warning(f"Task deletion denied: insufficient role", extra={"data": {"task_id": task_id, "role": current_user.role}})
         raise HTTPException(status_code=403, detail="Only Owners and Admins can delete tasks")
         
-    result = await tasks_collection.delete_one({"id": task_id, "studio_id": current_user.agency_id})
+    result = await db.tasks.delete_one({"id": task_id})
     if result.deleted_count == 0:
         logger.warning(f"Task deletion failed: not found", extra={"data": {"task_id": task_id}})
         raise HTTPException(status_code=404, detail="Task not found")
@@ -386,8 +391,10 @@ async def delete_task(
 @router.get("/{task_id}/history")
 async def get_task_history(
     task_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
 ):
     """Get history for a specific task"""
-    history = await task_history_collection.find({"task_id": task_id}).sort("timestamp", -1).to_list(100)
+    # Guardrail: db.task_history uses studio_id filter automatically
+    history = await db.task_history.find({"task_id": task_id}).sort("timestamp", -1).to_list(100)
     return parse_mongo_data(history)

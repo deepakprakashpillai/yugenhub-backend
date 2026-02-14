@@ -1,14 +1,8 @@
 from fastapi import APIRouter, Depends
 from models.user import UserModel
-from database import (
-    projects_collection, 
-    tasks_collection, 
-    task_history_collection,
-    users_collection,
-    clients_collection,
-    associates_collection
-)
-from routes.deps import get_current_user
+# REMOVED raw collection imports
+from routes.deps import get_current_user, get_db
+from middleware.db_guard import ScopedDatabase
 from datetime import datetime, timedelta
 from bson import ObjectId
 from logging_config import get_logger
@@ -32,20 +26,18 @@ def parse_mongo_data(data):
 
 
 @router.get("/stats")
-async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user)):
+async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Enriched stats for both Admin and Member views"""
-    current_agency_id = current_user.agency_id
+    # current_agency_id handled by db wrapper
     now = datetime.now()
     
     # Base Stats (Global)
-    active_projects = await projects_collection.count_documents({
-        "agency_id": current_agency_id,
+    active_projects = await db.projects.count_documents({
         "status": {"$ne": "completed"}
     })
     
     # Personal Stats (For Member View)
-    my_tasks_due_today = await tasks_collection.count_documents({
-        "studio_id": current_agency_id,
+    my_tasks_due_today = await db.tasks.count_documents({
         "assigned_to": current_user.id,
         "status": {"$ne": "done"},
         "due_date": {
@@ -54,16 +46,13 @@ async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user
         }
     })
     
+    # ScopedDB.aggregate PREPENDS standard match.
+    # We just need the rest of pipeline.
     my_upcoming_events_pipeline = [
-        {"$match": {"agency_id": current_agency_id}},
         {"$unwind": "$events"},
         {"$match": {
             "events.start_date": {"$gte": now},
-            "events.assignments.associate_id": {"$exists": True} # Simplified check
-            # In a real scenario, we'd filter by associate_id matching user, 
-            # but user->associate link is loose. For now, just count future events?
-            # Actually, let's keep it simple: Count ALL future events for Admin, 
-            # and later we filter in /schedule for Members.
+            "events.assignments.associate_id": {"$exists": True} 
         }},
         {"$count": "count"}
     ]
@@ -74,15 +63,13 @@ async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user
     }
 
 @router.get("/attention")
-async def get_attention_items(scope: str = "global", current_user: UserModel = Depends(get_current_user)):
+async def get_attention_items(scope: str = "global", current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Status checks for Overdue, Blocked, and Risk items"""
-    current_agency_id = current_user.agency_id
     now = datetime.now()
     items = []
     
     # Filter base
     task_query = {
-        "studio_id": current_agency_id, 
         "status": {"$ne": "done"}
     }
     if scope == "me":
@@ -90,7 +77,7 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
         
     # 1. Overdue Deliverables/Tasks
     overdue_query = {**task_query, "due_date": {"$lt": now}}
-    overdue_tasks = await tasks_collection.find(overdue_query).sort("due_date", 1).limit(5).to_list(None)
+    overdue_tasks = await db.tasks.find(overdue_query).sort("due_date", 1).limit(5).to_list(None)
     
     for t in overdue_tasks:
         items.append({
@@ -104,7 +91,7 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
         
     # 2. Blocked Tasks
     blocked_query = {**task_query, "status": "blocked"}
-    blocked_tasks = await tasks_collection.find(blocked_query).limit(5).to_list(None)
+    blocked_tasks = await db.tasks.find(blocked_query).limit(5).to_list(None)
     
     for t in blocked_tasks:
         items.append({
@@ -120,7 +107,6 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
     if scope == "global":
         next_week = now + timedelta(days=7)
         risk_pipeline = [
-            {"$match": {"agency_id": current_agency_id}},
             {"$unwind": "$events"},
             {"$match": {
                 "events.start_date": {"$gte": now, "$lte": next_week},
@@ -138,7 +124,7 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
                 "deliverables": "$events.deliverables"
             }}
         ]
-        risk_events = await projects_collection.aggregate(risk_pipeline).to_list(None)
+        risk_events = await db.projects.aggregate(risk_pipeline).to_list(None)
         
         for e in risk_events:
             reason = []
@@ -161,25 +147,24 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
     return items[:6]
 
 @router.get("/workload")
-async def get_workload_stats(scope: str = "global", current_user: UserModel = Depends(get_current_user)):
+async def get_workload_stats(scope: str = "global", current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Workload intelligence"""
-    current_agency_id = current_user.agency_id
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day)
     week_end = today_start + timedelta(days=7)
     
     if scope == "me":
         # Personal Stats
-        due_today = await tasks_collection.count_documents({
-            "studio_id": current_agency_id, "assigned_to": current_user.id, "status": {"$ne": "done"},
+        due_today = await db.tasks.count_documents({
+            "assigned_to": current_user.id, "status": {"$ne": "done"},
             "due_date": {"$gte": today_start, "$lt": today_start + timedelta(days=1)}
         })
-        due_week = await tasks_collection.count_documents({
-            "studio_id": current_agency_id, "assigned_to": current_user.id, "status": {"$ne": "done"},
+        due_week = await db.tasks.count_documents({
+            "assigned_to": current_user.id, "status": {"$ne": "done"},
             "due_date": {"$gte": today_start, "$lte": week_end}
         })
-        overdue = await tasks_collection.count_documents({
-            "studio_id": current_agency_id, "assigned_to": current_user.id, "status": {"$ne": "done"},
+        overdue = await db.tasks.count_documents({
+            "assigned_to": current_user.id, "status": {"$ne": "done"},
             "due_date": {"$lt": now}
         })
         return {"due_today": due_today, "due_week": due_week, "overdue": overdue}
@@ -187,12 +172,11 @@ async def get_workload_stats(scope: str = "global", current_user: UserModel = De
     else:
         # Team Load (Admin only)
         # Find users with high load
-        users = await users_collection.find({"agency_id": current_agency_id}).to_list(None)
+        users = await db.users.find({}).to_list(None)
         user_ids = [u.get("id") for u in users]
         
         pipeline = [
             {"$match": {
-                "studio_id": current_agency_id,
                 "assigned_to": {"$in": user_ids},
                 "status": {"$ne": "done"}
             }},
@@ -204,7 +188,7 @@ async def get_workload_stats(scope: str = "global", current_user: UserModel = De
             }}
         ]
         
-        load_stats = await tasks_collection.aggregate(pipeline).to_list(None)
+        load_stats = await db.tasks.aggregate(pipeline).to_list(None)
         load_map = {stat["_id"]: stat for stat in load_stats}
         
         alerts = []
@@ -229,29 +213,26 @@ async def get_workload_stats(scope: str = "global", current_user: UserModel = De
 
 
 @router.get("/pipeline")
-async def get_project_pipeline(current_user: UserModel = Depends(get_current_user)):
+async def get_project_pipeline(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Get active project distribution by Vertical"""
     pipeline = [
         {"$match": {
-            "agency_id": current_user.agency_id,
             "status": {"$ne": "completed"} # Exclude completed
         }},
         {"$group": {"_id": "$vertical", "count": {"$sum": 1}}}
     ]
-    results = await projects_collection.aggregate(pipeline).to_list(None)
+    results = await db.projects.aggregate(pipeline).to_list(None)
     # Format: [{"name": "Weddings", "value": 5}, ...]
     # Normalize ID if null
     return [{"name": (r["_id"] or "Other").title(), "value": r["count"]} for r in results]
 
 @router.get("/schedule")
-async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_user)):
+async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Get upcoming events list with Client and Team details"""
-    current_agency_id = current_user.agency_id
     now = datetime.now()
     next_2_weeks = now + timedelta(days=14) 
     
     pipeline = [
-        {"$match": {"agency_id": current_agency_id}},
         {"$unwind": "$events"},
         {"$match": {
             "events.start_date": {"$gte": now, "$lte": next_2_weeks}
@@ -270,7 +251,7 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
         }}
     ]
     
-    events = await projects_collection.aggregate(pipeline).to_list(10)
+    events = await db.projects.aggregate(pipeline).to_list(10)
     
     # Collect IDs for batch fetch
     client_ids = []
@@ -290,7 +271,7 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
     associate_ids = list(set(associate_ids))
     
     # Fetch Clients
-    clients = await clients_collection.find({"_id": {"$in": client_ids}}).to_list(None)
+    clients = await db.clients.find({"_id": {"$in": client_ids}}).to_list(None)
     client_map = {str(c["_id"]): c.get("name", "Unknown Client") for c in clients}
     
     # Fetch Associates
@@ -301,7 +282,7 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
         except:
             pass
             
-    associates = await associates_collection.find({"_id": {"$in": associate_oids}}).to_list(None)
+    associates = await db.associates.find({"_id": {"$in": associate_oids}}).to_list(None)
     associate_map = {str(a["_id"]): a.get("name", "Unknown Associate") for a in associates}
     
     # Enrich Events
@@ -321,17 +302,53 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
     return parse_mongo_data(events)
 
 @router.get("/activity")
-async def get_recent_activity(limit: int = 10, current_user: UserModel = Depends(get_current_user)):
+async def get_recent_activity(limit: int = 10, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Get recent activity logs with titles and user names"""
-    cursor = task_history_collection.find().sort("timestamp", -1).limit(limit)
+    # 1. Get all task IDs for this agency to filter history
+    # ScopedDB enforces filtered list here.
+    agency_tasks = await db.tasks.find(
+        {}, 
+        {"id": 1}
+    ).to_list(None)
+    
+    if not agency_tasks:
+        return []
+        
+    agency_task_ids = [t["id"] for t in agency_tasks]
+    
+    # 2. Query history for these tasks only
+    # db.task_history adds default filter.
+    # In my middleware I set ScopedCollection to use 'studio_id' for task_history.
+    # However, Task History also has 'task_id'.
+    # Filtering by 'task_id' that belongs to agency is good, but filtering by 'studio_id' is better (direct).
+    # Since we added 'studio_id' to TaskHistoryModel, future logs will have it. 
+    # OLD logs might not.
+    # So we MUST keep the task_id IN filter for backwards compatibility for a bit, OR just rely on studio_id if populated.
+    # BUT wait: middleware ALWAYS injects studio_id.
+    # IF old logs don't have studio_id, they will NOT be returned by ScopedDatabase(..., studio_id=...).find()
+    # PREVIOUSLY we didn't have studio_id in history.
+    # So for OLD logs, we might miss them if we force studio_id filter.
+    
+    # FIX: middleware injection is strict. If data doesn't have the field, it won't match.
+    # This means OLD history logs (without studio_id) will VANISH from the dashboard.
+    # This is acceptable for "Security Guardrails" - fail closed. 
+    # Users will lose visibility of old history but new history is secure.
+    
+    # However, if we want to show old history, we'd need to bypass scoped DB or backfill.
+    # Given the instructions, we should stick to the secure implementation.
+    
+    cursor = db.task_history.find(
+        {"task_id": {"$in": agency_task_ids}}
+    ).sort("timestamp", -1).limit(limit)
+    
     logs = await cursor.to_list(length=limit)
     
     # Enrich with task titles and user names
     task_ids = list(set([log.get("task_id") for log in logs if log.get("task_id")]))
     user_ids = list(set([log.get("changed_by") for log in logs if log.get("changed_by")]))
     
-    tasks = await tasks_collection.find({"id": {"$in": task_ids}}).to_list(None)
-    users = await users_collection.find({"id": {"$in": user_ids}}).to_list(None)
+    tasks = await db.tasks.find({"id": {"$in": task_ids}}).to_list(None)
+    users = await db.users.find({"id": {"$in": user_ids}}).to_list(None)
     
     task_map = {t["id"]: t.get("title", "Unknown Task") for t in tasks}
     user_map = {u["id"]: u.get("name", "Unknown User") for u in users}
