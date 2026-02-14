@@ -193,11 +193,18 @@ async def list_tasks(
     pipeline.append({"$match": match_stage})
 
     # 2. Lookup Project Details (for project context)
+    # Convert string project_id to ObjectId for lookup
+    pipeline.append({
+        "$addFields": {
+            "project_oid": {"$toObjectId": "$project_id"}
+        }
+    })
+    
     pipeline.append({
         "$lookup": {
             "from": "projects",
-            "localField": "project_id",
-            "foreignField": "id",
+            "localField": "project_oid",
+            "foreignField": "_id",
             "as": "project_info"
         }
     })
@@ -206,6 +213,7 @@ async def list_tasks(
     pipeline.append({
         "$addFields": {
             "project_name": {"$arrayElemAt": ["$project_info.title", 0]},
+            "project_code": {"$arrayElemAt": ["$project_info.code", 0]},
             "client_name": {"$arrayElemAt": ["$project_info.metadata.client_name", 0]},
             "project_color": {"$arrayElemAt": ["$project_info.color", 0]},
             "priority_score": {
@@ -222,8 +230,8 @@ async def list_tasks(
         }
     })
     
-    # 4. Remove project_info array to keep clean
-    pipeline.append({"$project": {"project_info": 0}})
+    # 4. Remove project_info array and temporary oid
+    pipeline.append({"$project": {"project_info": 0, "project_oid": 0}})
 
     # 5. Sort (Compound: Primary sort + Priority as tiebreaker)
     sort_direction = -1 if order == "desc" else 1
