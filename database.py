@@ -30,4 +30,11 @@ tasks_collection = db.get_collection("tasks")
 task_history_collection = db.get_collection("task_history")
 notifications_collection = db.get_collection("notifications")
 
+# Finance Collections
+accounts_collection = db.get_collection("finance_accounts")
+transactions_collection = db.get_collection("finance_transactions")
+ledgers_collection = db.get_collection("finance_ledgers")
+invoices_collection = db.get_collection("finance_invoices")
+payouts_collection = db.get_collection("finance_payouts")
+
 logger.info("Database collections initialized", extra={"data": {"db": "yugen_hub"}})

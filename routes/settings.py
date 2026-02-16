@@ -491,6 +491,42 @@ async def update_verticals(
     return {"message": "Verticals updated"}
 
 
+# ─── FINANCE SETTINGS ────────────────────────────────────────────────────────
+
+@router.get("/finance/categories")
+async def get_finance_categories(
+    current_user: UserModel = Depends(get_current_user), 
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Get finance categories configuration."""
+    config = await get_or_create_config(db)
+    return parse_mongo_data({
+        "categories": config.get("finance_categories", DEFAULT_AGENCY_CONFIG["finance_categories"])
+    })
+
+
+@router.patch("/finance/categories")
+async def update_finance_categories(
+    updates: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update finance categories configuration."""
+    categories = updates.get("categories")
+    if categories is None:
+        raise HTTPException(status_code=400, detail="'categories' field required")
+
+    await db.agency_configs.update_one(
+        {},
+        {"$set": {"finance_categories": categories}}
+    )
+    logger.info(
+        f"Finance categories updated",
+        extra={"data": {"agency_id": current_user.agency_id, "count": len(categories)}}
+    )
+    return {"message": "Finance categories updated"}
+
+
 # ─── NOTIFICATION PREFERENCES ───────────────────────────────────────────────
 
 NOTIFICATION_PREFS_COLLECTION = "notification_prefs"

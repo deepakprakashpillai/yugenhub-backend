@@ -25,6 +25,73 @@ DEFAULT_AGENCY_CONFIG = {
         "Raw Photos", "Edited Photos", "Wedding Album"
     ],
 
+    "finance_categories": [
+        # Income Categories
+        {
+            "id": "sales",
+            "name": "Sales",
+            "type": "income",
+            "subcategories": [
+                {"id": "service_revenue", "name": "Service Revenue"},
+                {"id": "product_sales", "name": "Product Sales"}
+            ]
+        },
+        {
+            "id": "consulting",
+            "name": "Consulting",
+            "type": "income",
+            "subcategories": []
+        },
+        # Expense Categories
+        {
+            "id": "operational",
+            "name": "Operational",
+            "type": "expense",
+            "subcategories": [
+                {"id": "rent", "name": "Rent"},
+                {"id": "utilities", "name": "Utilities"},
+                {"id": "internet", "name": "Internet"}
+            ]
+        },
+        {
+            "id": "salaries",
+            "name": "Salaries & Wages",
+            "type": "expense",
+            "subcategories": [
+                {"id": "full_time", "name": "Full Time Staff"},
+                {"id": "contractors", "name": "Contractors"}
+            ]
+        },
+        {
+            "id": "marketing",
+            "name": "Marketing",
+            "type": "expense",
+            "subcategories": [
+                {"id": "ads", "name": "Ads"},
+                {"id": "events", "name": "Events"}
+            ]
+        },
+        {
+            "id": "equipment",
+            "name": "Equipment",
+            "type": "expense",
+            "subcategories": [
+                {"id": "purchase", "name": "Purchase"},
+                {"id": "maintenance", "name": "Maintenance"}
+            ]
+        },
+        {
+            "id": "travel",
+            "name": "Travel",
+            "type": "expense",
+            "subcategories": [
+                {"id": "flights", "name": "Flights"},
+                {"id": "hotels", "name": "Hotels"},
+                {"id": "food", "name": "Food"}
+            ]
+        }
+    ],
+
     "verticals": [
         {
             "id": "knots",

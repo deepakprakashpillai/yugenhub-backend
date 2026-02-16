@@ -16,6 +16,18 @@ class Vertical(BaseModel):
     fields: List[VerticalField]
 
 
+class SubCategory(BaseModel):
+    id: str
+    name: str
+
+
+class FinanceCategory(BaseModel):
+    id: str
+    name: str
+    type: str  # 'income' or 'expense'
+    subcategories: List[SubCategory] = []
+
+
 class AgencyConfigModel(BaseModel):
     agency_id: str = "default"
 
@@ -32,6 +44,9 @@ class AgencyConfigModel(BaseModel):
     status_options: List[Dict[str, str]] = []
     lead_sources: List[str] = []
     deliverable_types: List[str] = []
+
+    # Finance config
+    finance_categories: List[FinanceCategory] = []
 
     # Verticals
     verticals: List[Vertical] = []

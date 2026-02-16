@@ -7,7 +7,7 @@ from logging_config import get_logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from middleware import RequestLifecycleMiddleware
-from routes import associate, client, config, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates
+from routes import associate, client, config, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance
 
 logger = get_logger("app")
 
@@ -16,7 +16,7 @@ app = FastAPI(title="YugenHub API")
 # CORS remains here as it's a global setting
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"], 
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,6 +38,7 @@ app.include_router(users.router)
 app.include_router(dashboard.router)
 app.include_router(settings.router)
 app.include_router(templates.router)
+app.include_router(finance.router)
 
 logger.info("All routers registered, YugenHub API ready")
 
