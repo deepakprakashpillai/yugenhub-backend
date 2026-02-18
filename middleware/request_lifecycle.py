@@ -11,12 +11,12 @@ from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 from logging_config import get_logger, request_id_var, agency_id_var, user_id_var
 from jose import jwt
-import os
+from config import config
 
 logger = get_logger("middleware")
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret_key_change_in_prod")
-ALGORITHM = "HS256"
+SECRET_KEY = config.SECRET_KEY
+ALGORITHM = config.ALGORITHM
 
 
 def _extract_user_from_token(request: Request) -> tuple[str, str]:

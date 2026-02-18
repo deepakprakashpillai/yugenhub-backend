@@ -214,6 +214,7 @@ async def list_tasks(
         "$addFields": {
             "project_name": {"$arrayElemAt": ["$project_info.title", 0]},
             "project_code": {"$arrayElemAt": ["$project_info.code", 0]},
+            "project_vertical": {"$arrayElemAt": ["$project_info.vertical", 0]},
             "client_name": {"$arrayElemAt": ["$project_info.metadata.client_name", 0]},
             "project_color": {"$arrayElemAt": ["$project_info.color", 0]},
             "priority_score": {

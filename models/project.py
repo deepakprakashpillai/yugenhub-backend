@@ -31,7 +31,7 @@ class EventModel(BaseModel):
     notes: str = ""
 
 class ProjectModel(BaseModel):
-    code: str
+    code: Optional[str] = None
     agency_id: str = "default"
     vertical: str
     client_id: str

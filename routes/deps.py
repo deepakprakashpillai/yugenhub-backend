@@ -6,17 +6,14 @@ from typing import Optional
 from database import users_collection
 from models.user import UserModel
 from logging_config import get_logger
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+from config import config
 
 logger = get_logger("auth")
 
-# CONFIG
-SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret_key_change_in_prod")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7 Days
+# Config from central config
+SECRET_KEY = config.SECRET_KEY
+ALGORITHM = config.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = config.ACCESS_TOKEN_EXPIRE_MINUTES
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 

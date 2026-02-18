@@ -316,6 +316,7 @@ async def get_workflow(current_user: UserModel = Depends(get_current_user), db: 
         "status_options": status_options,
         "lead_sources": config.get("lead_sources", DEFAULT_AGENCY_CONFIG["lead_sources"]),
         "deliverable_types": config.get("deliverable_types", DEFAULT_AGENCY_CONFIG["deliverable_types"]),
+        "associate_roles": config.get("associate_roles", DEFAULT_AGENCY_CONFIG.get("associate_roles", [])),
     })
 
 
@@ -328,7 +329,7 @@ async def update_workflow(
     """Update workflow configuration. Owner only.
     Protects fixed statuses from modification or removal.
     """
-    allowed_fields = {"status_options", "lead_sources", "deliverable_types"}
+    allowed_fields = {"status_options", "lead_sources", "deliverable_types", "associate_roles"}
     filtered = {k: v for k, v in updates.items() if k in allowed_fields}
 
     if not filtered:

@@ -69,6 +69,31 @@ def parse_mongo_data(data):
         return {k: (str(v) if isinstance(v, ObjectId) else parse_mongo_data(v)) for k, v in data.items()}
     return data
 
+# --- HELPER: Sequential Project Codes ---
+async def get_next_sequence_value(db: ScopedDatabase, vertical: str) -> str:
+    """
+    Generate a sequential project code: [PREFIX]-[YEAR]-[SEQ]
+    Example: KN-2026-0001
+    """
+    now = datetime.now()
+    year = now.year
+    prefix = vertical[:2].upper()
+    
+    # Counter key is unique per vertical and year within the agency
+    counter_id = f"projects_{vertical}_{year}"
+    
+    # Atomic increment using find_one_and_update
+    # We use db.counters (ScopedCollection) which automatically scopes by agency_id
+    counter = await db.counters.find_one_and_update(
+        {"_id": counter_id},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=True
+    )
+    
+    seq_number = counter.get("seq", 1)
+    return f"{prefix}-{year}-{seq_number:04d}"
+
 # --- CORE ENDPOINTS ---
 
 @router.post("", status_code=201)
@@ -77,57 +102,85 @@ async def create_project(
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
 ):
-    """CREATE: Validate vertical against config and save new project"""
-    # NOTE: ScopedDB automatically injects agency_id filter on reads/writes.
-    # explicit setting on model is still good for clarity but redundant for security.
+    """CREATE: Generate sequential code and save project"""
     project.agency_id = current_user.agency_id
 
-    # 1. Fetch the active config to check valid verticals
-    # db.agency_configs implicitly filters by agency_id
+    # 1. Fetch the active config
     config = await db.agency_configs.find_one({})
     allowed_verticals = [v["id"] for v in config.get("verticals", [])] if config else []
     
     # 2. Validation
-    # 2a. Validate Vertical
     if project.vertical not in allowed_verticals:
         raise HTTPException(
             status_code=400, 
             detail=f"Invalid vertical. Allowed: {allowed_verticals}"
         )
 
-    # 2b. Validate Metadata against Configured Fields
-    selected_vertical = next((v for v in config["verticals"] if v["id"] == project.vertical), None)
-    if selected_vertical:
-        for field_def in selected_vertical.get("fields", []):
-            field_name = field_def["name"]
-            is_required = True 
-            
-            if is_required and field_name not in project.metadata:
-                pass 
+    # 3. Automatic Code Generation
+    # If code is missing or placeholder-y, generate a sequential one
+    if not project.code or "-" not in project.code:
+        project.code = await get_next_sequence_value(db, project.vertical)
 
-            if field_name in project.metadata:
-                value = project.metadata[field_name]
-                if field_def["type"] == "select" and value not in field_def.get("options", []):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid value for '{field_name}'. Allowed: {field_def.get('options')}"
-                    )
-
-    # 3. Check for duplicate Project Code
     project_data = project.model_dump()
     project_data["code"] = project_data["code"].upper()
     
-    # Guardrail ensures we only check THIS agency's projects
+    # Double check for duplicate (Collision guardrail)
     if await db.projects.find_one({"code": project_data["code"]}):
-        raise HTTPException(status_code=400, detail="Project code already exists")
-        
-    # 4. Save
+        # If collision happens (rare with atomic counters but possible if manual entry exists), 
+        # try one more time or fail. 
+        # For simplicity, we'll try one more increment if code was auto-generated.
+        project_data["code"] = await get_next_sequence_value(db, project.vertical)
+        if await db.projects.find_one({"code": project_data["code"]}):
+             raise HTTPException(status_code=400, detail="Project code collision detected")
+
+    # 4. Save Project
     # Guardrail ensures agency_id is injected
     new_project = await db.projects.insert_one(project_data)
+    project_id = str(new_project.inserted_id)
+    project_data["_id"] = project_id
     
-    logger.info(f"Project created", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical']}})
+    # 5. Handle Nested Events (Sync Tasks & Notifications)
+    # If events were provided in the initial payload, we process them now.
+    if project.events:
+        all_new_tasks = []
+        for event in project.events:
+            # a. Create Tasks for Deliverables
+            if event.deliverables:
+                for deliverable in event.deliverables:
+                    task = TaskModel(
+                        title=f"{deliverable.type} ({event.type})",
+                        description=f"Deliverable for {event.type}",
+                        project_id=project_id,
+                        event_id=event.id,
+                        status="todo",
+                        priority=deliverable.status.lower() if hasattr(deliverable, 'priority') else "medium", # Fallback
+                        due_date=deliverable.due_date,
+                        assigned_to=deliverable.incharge_id,
+                        studio_id=current_user.agency_id,
+                        created_by=current_user.id,
+                        type="project",
+                        category="deliverable"
+                    )
+                    all_new_tasks.append(task.model_dump())
+            
+            # b. Send Notifications for Assignments
+            if event.assignments:
+                for assignment in event.assignments:
+                    await notify_associate_assignment(
+                        db,
+                        assignment.associate_id,
+                        project_data["code"],
+                        event.type,
+                        event.start_date,
+                        current_user.agency_id
+                    )
+        
+        if all_new_tasks:
+            await db.tasks.insert_many(all_new_tasks)
+            logger.info(f"Created {len(all_new_tasks)} tasks during project creation", extra={"data": {"project_id": project_id}})
+
+    logger.info(f"Project created with sequential code", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical'], "event_count": len(project.events)}})
     
-    project_data["_id"] = str(new_project.inserted_id)
     return parse_mongo_data(project_data)
 
 @router.get("")

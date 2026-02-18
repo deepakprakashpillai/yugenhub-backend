@@ -24,6 +24,12 @@ DEFAULT_AGENCY_CONFIG = {
         "Cinematic Film", "Teaser", "Traditional Video",
         "Raw Photos", "Edited Photos", "Wedding Album"
     ],
+    
+    "associate_roles": [
+        "Photographer", "Cinematographer", "Editor", 
+        "Makeup Artist", "DJ", "Decorator", 
+        "Coordinator", "Assistant", "Other"
+    ],
 
     "finance_categories": [
         # Income Categories
