@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Body, HTTPException, Depends, Query
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 # REMOVED raw collection imports
 from models.task import TaskModel, TaskHistoryModel
 from models.notification import NotificationModel
@@ -56,6 +56,135 @@ async def log_history(db: ScopedDatabase, task_id: str, user_id: str, changes: D
         await db.task_history.insert_many(history_entries)
 
 # --- ENDPOINTS ---
+
+@router.get("/grouped")
+async def list_tasks_grouped(
+    category: Optional[str] = None,
+    has_project: Optional[bool] = None,
+    priority: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    search: Optional[str] = None,
+    project_id: Optional[str] = None,
+    context: Optional[str] = Query("tasks_page"),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Return tasks grouped by status for Kanban board view"""
+    
+    # Base match (RBAC + filters)
+    match_stage = {}
+    
+    if current_user.role.lower() == 'member':
+        if context == "project_page" and project_id:
+            pass
+        else:
+            match_stage["assigned_to"] = current_user.id
+    elif assigned_to:
+        match_stage["assigned_to"] = assigned_to
+
+    if search:
+        match_stage["title"] = {"$regex": search, "$options": "i"}
+    if project_id:
+        match_stage["project_id"] = project_id
+    elif has_project is True:
+        match_stage["project_id"] = {"$ne": None}
+    elif has_project is False:
+        match_stage["project_id"] = None
+    if category:
+        match_stage["category"] = category
+    if priority and priority != 'all':
+        match_stage["priority"] = priority
+
+    now = datetime.now()
+    thirty_days_ago = now - timedelta(days=30)
+
+    pipeline = [
+        {"$match": match_stage},
+        # For done tasks, only include last 30 days
+        {"$match": {
+            "$or": [
+                {"status": {"$ne": "done"}},
+                {"status": "done", "updated_at": {"$gte": thirty_days_ago}}
+            ]
+        }},
+        # Lookup project details
+        {"$addFields": {"project_oid": {"$toObjectId": "$project_id"}}},
+        {"$lookup": {
+            "from": "projects",
+            "localField": "project_oid",
+            "foreignField": "_id",
+            "as": "project_info"
+        }},
+        {"$addFields": {
+            "project_name": {"$arrayElemAt": ["$project_info.title", 0]},
+            "project_code": {"$arrayElemAt": ["$project_info.code", 0]},
+            "project_vertical": {"$arrayElemAt": ["$project_info.vertical", 0]},
+            "client_name": {"$arrayElemAt": ["$project_info.metadata.client_name", 0]},
+            "project_color": {"$arrayElemAt": ["$project_info.color", 0]},
+            "is_overdue": {
+                "$and": [
+                    {"$ne": ["$due_date", None]},
+                    {"$lt": ["$due_date", now]},
+                    {"$ne": ["$status", "done"]}
+                ]
+            },
+            "priority_score": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$eq": ["$priority", "urgent"]}, "then": 4},
+                        {"case": {"$eq": ["$priority", "high"]}, "then": 3},
+                        {"case": {"$eq": ["$priority", "medium"]}, "then": 2},
+                        {"case": {"$eq": ["$priority", "low"]}, "then": 1}
+                    ],
+                    "default": 0
+                }
+            }
+        }},
+        {"$project": {"project_info": 0, "project_oid": 0}},
+        # Sort within each group: priority desc, then due_date asc
+        {"$sort": {"priority_score": -1, "due_date": 1}},
+        # Group by status
+        {"$group": {
+            "_id": "$status",
+            "tasks": {"$push": "$$ROOT"},
+            "count": {"$sum": 1},
+            "overdue_count": {"$sum": {"$cond": [{"$eq": ["$is_overdue", True]}, 1, 0]}}
+        }}
+    ]
+
+    result = await db.tasks.aggregate(pipeline).to_list(10)
+    
+    # Build structured response
+    statuses = ['todo', 'in_progress', 'review', 'blocked', 'done']
+    groups = {}
+    total = 0
+    total_overdue = 0
+    total_unassigned = 0
+    
+    for s in statuses:
+        group_data = next((g for g in result if g["_id"] == s), None)
+        if group_data:
+            tasks = parse_mongo_data(group_data["tasks"])
+            groups[s] = {
+                "tasks": tasks,
+                "count": group_data["count"],
+                "overdue_count": group_data["overdue_count"]
+            }
+            total += group_data["count"]
+            total_overdue += group_data["overdue_count"]
+            total_unassigned += sum(1 for t in tasks if not t.get("assigned_to"))
+        else:
+            groups[s] = {"tasks": [], "count": 0, "overdue_count": 0}
+
+    return {
+        "groups": groups,
+        "summary": {
+            "total": total,
+            "overdue": total_overdue,
+            "unassigned": total_unassigned
+        }
+    }
+
 
 @router.post("", status_code=201)
 async def create_task(

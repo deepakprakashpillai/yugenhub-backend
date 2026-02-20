@@ -1,5 +1,15 @@
-.env
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.log
+*.swp
+.DS_Store
+*.egg-info/
+dist/
+build/
 
+.env
 venv/
 logs/
 __pycache__/
