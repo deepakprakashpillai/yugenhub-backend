@@ -1,14 +1,17 @@
-from fastapi import APIRouter, HTTPException, Query
+import uuid
+from fastapi import APIRouter, HTTPException, Query, Depends, status, Body
 from typing import List, Optional
 from datetime import datetime
 from models.finance import AccountModel, TransactionModel, ClientLedgerModel, InvoiceModel, AssociatePayoutModel
-from database import accounts_collection, transactions_collection, ledgers_collection, invoices_collection, payouts_collection
 from bson import ObjectId
 
-from fastapi import APIRouter, HTTPException, Query, Depends, status
-from routes.deps import get_current_user
+from routes.deps import get_current_user, get_db
 from models.user import UserModel
+from middleware.db_guard import ScopedDatabase
 from constants import Roles
+from logging_config import get_logger
+
+logger = get_logger("finance")
 
 async def ensure_finance_access(current_user: UserModel = Depends(get_current_user)):
     if current_user.role not in [Roles.ADMIN, Roles.OWNER]:
@@ -20,20 +23,17 @@ async def ensure_finance_access(current_user: UserModel = Depends(get_current_us
 router = APIRouter(prefix="/api/finance", tags=["Finance"], dependencies=[Depends(ensure_finance_access)])
 
 # -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
-async def update_account_balance(account_id: str, amount: float, transaction_type: str):
-    # Use atomic $inc operator
+async def update_account_balance(db: ScopedDatabase, account_id: str, amount: float, transaction_type: str):
     inc_amount = 0.0
     if transaction_type == "income":
         inc_amount = amount
     elif transaction_type == "expense":
         inc_amount = -amount
-    # Transfer logic handled separately or by caller
 
     if inc_amount != 0:
-        await accounts_collection.update_one(
+        await db.accounts.update_one(
             {"id": account_id},
             {
                 "$inc": {"current_balance": inc_amount},
@@ -41,12 +41,9 @@ async def update_account_balance(account_id: str, amount: float, transaction_typ
             }
         )
 
-async def update_client_ledger(client_id: str, amount: float, operation: str):
-    # operation: 'invoice_created' (add to total_value)
-    #            'payment_received' (add to received_amount)
-    
+async def update_client_ledger(db: ScopedDatabase, client_id: str, amount: float, operation: str):
     # 1. Ensure Ledger Exists (Atomic upsert)
-    await ledgers_collection.update_one(
+    await db.ledgers.update_one(
         {"client_id": client_id},
         {"$setOnInsert": {
             "id": str(uuid.uuid4()),
@@ -68,10 +65,9 @@ async def update_client_ledger(client_id: str, amount: float, operation: str):
     
     if update_query:
         update_query["$set"] = {"last_updated": datetime.now()}
-        await ledgers_collection.update_one({"client_id": client_id}, update_query)
+        await db.ledgers.update_one({"client_id": client_id}, update_query)
 
-    # 3. Recalculate Balance & Status (Atomic Aggregation Update)
-    # Requires MongoDB 4.2+ for pipeline in update
+    # 3. Recalculate Balance & Status
     pipeline = [
         {"$set": {
             "balance_amount": {"$subtract": ["$total_value", "$received_amount"]}
@@ -88,28 +84,25 @@ async def update_client_ledger(client_id: str, amount: float, operation: str):
             }
         }}
     ]
-    await ledgers_collection.update_one({"client_id": client_id}, pipeline)
+    await db.ledgers.update_one({"client_id": client_id}, pipeline)
 
 # -----------------------------------------------------------------------------
 # Accounts API
 # -----------------------------------------------------------------------------
 @router.get("/accounts", response_model=List[AccountModel])
-async def get_accounts():
-    cursor = accounts_collection.find({})
+async def get_accounts(db: ScopedDatabase = Depends(get_db)):
+    cursor = db.accounts.find({})
     accounts = await cursor.to_list(length=100)
     return accounts
 
 @router.post("/accounts", response_model=AccountModel)
-async def create_account(account: AccountModel):
-    # Check if account name exists
-    existing = await accounts_collection.find_one({"name": account.name})
+async def create_account(account: AccountModel, db: ScopedDatabase = Depends(get_db)):
+    existing = await db.accounts.find_one({"name": account.name})
     if existing:
         raise HTTPException(status_code=400, detail="Account with this name already exists")
     
-    # Initialize current balance with opening balance
     account.current_balance = account.opening_balance
-    
-    await accounts_collection.insert_one(account.model_dump())
+    await db.accounts.insert_one(account.model_dump())
     return account
 
 # -----------------------------------------------------------------------------
@@ -124,7 +117,8 @@ async def get_transactions(
     type: Optional[str] = None,
     category: Optional[str] = None,
     page: int = 1,
-    limit: int = 50
+    limit: int = 50,
+    db: ScopedDatabase = Depends(get_db)
 ):
     query = {}
     if account_id:
@@ -139,37 +133,30 @@ async def get_transactions(
         query["date"] = {"$gte": start_date, "$lte": end_date}
         
     skip = (page - 1) * limit
-    cursor = transactions_collection.find(query).sort("date", -1).skip(skip).limit(limit)
+    cursor = db.transactions.find(query).sort("date", -1).skip(skip).limit(limit)
     transactions = await cursor.to_list(length=limit)
     return transactions
 
 @router.post("/transactions", response_model=TransactionModel)
-async def create_transaction(transaction: TransactionModel):
+async def create_transaction(transaction: TransactionModel, db: ScopedDatabase = Depends(get_db)):
     # 1. Validate Account
-    account = await accounts_collection.find_one({"id": transaction.account_id})
+    account = await db.accounts.find_one({"id": transaction.account_id})
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
     # 2. Handle Transfer
     if transaction.type == "transfer":
-        # Logic for transfer needs source and destination. 
-        # For MVP, let's assume 'transfer' in UI sends two requests or one request with destination.
-        # But per requirements: "Transfer creates two linked entries (debit + credit)"
-        # This endpoint receives ONE transaction. If it's a transfer, we expect the frontend 
-        # to confirm "This is a transfer to Account B".
-        # For now, let's keep it simple: The UI calls this API twice for transfers, or we can handle it here if we pass 'destination_account_id' in metadata used by FE.
-        # Let's assume the frontend handles the duality for now to keep the API atomic.
-        pass
+        pass  # Frontend handles duality for now
 
     # 3. Update Account Balance
-    await update_account_balance(transaction.account_id, transaction.amount, transaction.type)
+    await update_account_balance(db, transaction.account_id, transaction.amount, transaction.type)
     
     # 4. Save Transaction
-    await transactions_collection.insert_one(transaction.model_dump())
+    await db.transactions.insert_one(transaction.model_dump())
     
     # 5. Link to Client Ledger if applicable (Income)
     if transaction.type == "income" and transaction.client_id:
-        await update_client_ledger(transaction.client_id, transaction.amount, "payment_received")
+        await update_client_ledger(db, transaction.client_id, transaction.amount, "payment_received")
         
     return transaction
 
@@ -179,72 +166,61 @@ async def create_transaction(transaction: TransactionModel):
 @router.get("/invoices", response_model=List[InvoiceModel])
 async def get_invoices(
     project_id: Optional[str] = None,
-    limit: int = 100
+    limit: int = 100,
+    db: ScopedDatabase = Depends(get_db)
 ):
     query = {}
     if project_id:
         query["project_id"] = project_id
         
-    cursor = invoices_collection.find(query).sort("created_at", -1)
+    cursor = db.invoices.find(query).sort("created_at", -1)
     return await cursor.to_list(length=limit)
 
 @router.post("/invoices", response_model=InvoiceModel)
-async def create_invoice(invoice: InvoiceModel):
-    existing = await invoices_collection.find_one({"invoice_no": invoice.invoice_no})
+async def create_invoice(invoice: InvoiceModel, db: ScopedDatabase = Depends(get_db)):
+    existing = await db.invoices.find_one({"invoice_no": invoice.invoice_no})
     if existing:
         raise HTTPException(status_code=400, detail="Invoice number already exists")
     
-    await invoices_collection.insert_one(invoice.model_dump())
+    await db.invoices.insert_one(invoice.model_dump())
     
-    # Update Client Ledger (only if sent/paid, but usually on creation/sending)
-    # Requirement: "Creating an invoice updates the client ledger"
-    # We'll assume any invoice created adds to the ledger.
     if invoice.status != "draft":
-        await update_client_ledger(invoice.client_id, invoice.total_amount, "invoice_created")
+        await update_client_ledger(db, invoice.client_id, invoice.total_amount, "invoice_created")
         
     return invoice
         
 @router.put("/invoices/{invoice_id}", response_model=InvoiceModel)
-async def update_invoice(invoice_id: str, invoice_data: InvoiceModel):
-    old_invoice = await invoices_collection.find_one({"id": invoice_id})
+async def update_invoice(invoice_id: str, invoice_data: InvoiceModel, db: ScopedDatabase = Depends(get_db)):
+    old_invoice = await db.invoices.find_one({"id": invoice_id})
     if not old_invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     
-    # Ledger Adjustment Logic
-    # 1. Revert old impact if it was counted (Sent/Paid)
     if old_invoice.get("status") in ["sent", "partially_paid", "paid"]:
-        # We need to DECREASE total_value by old amount
-        # This function `update_client_ledger` adds. So we pass negative.
-        # But wait, update_client_ledger logic is: total_value += amount. So passing negative works.
-        await update_client_ledger(old_invoice["client_id"], -old_invoice["total_amount"], "invoice_created")
+        await update_client_ledger(db, old_invoice["client_id"], -old_invoice["total_amount"], "invoice_created")
 
-    # 2. Update Invoice
-    # exclude id from update just in case
     update_dict = invoice_data.model_dump(exclude={"id", "created_at"})
     update_dict["updated_at"] = datetime.now()
     
-    await invoices_collection.update_one(
+    await db.invoices.update_one(
         {"id": invoice_id},
         {"$set": update_dict}
     )
     
-    # 3. Apply new impact if applicable
     if invoice_data.status in ["sent", "partially_paid", "paid"]:
-         await update_client_ledger(invoice_data.client_id, invoice_data.total_amount, "invoice_created")
+         await update_client_ledger(db, invoice_data.client_id, invoice_data.total_amount, "invoice_created")
 
     return {**invoice_data.model_dump(), "id": invoice_id}
 
 @router.post("/invoices/{invoice_id}/status")
-async def update_invoice_status(invoice_id: str, status: str):
-    invoice = await invoices_collection.find_one({"id": invoice_id})
+async def update_invoice_status(invoice_id: str, status: str, db: ScopedDatabase = Depends(get_db)):
+    invoice = await db.invoices.find_one({"id": invoice_id})
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
         
-    # If moving from draft to sent, update ledger
     if invoice["status"] == "draft" and status == "sent":
-        await update_client_ledger(invoice["client_id"], invoice["total_amount"], "invoice_created")
+        await update_client_ledger(db, invoice["client_id"], invoice["total_amount"], "invoice_created")
         
-    await invoices_collection.update_one(
+    await db.invoices.update_one(
         {"id": invoice_id},
         {"$set": {"status": status, "updated_at": datetime.now()}}
     )
@@ -254,10 +230,9 @@ async def update_invoice_status(invoice_id: str, status: str):
 # Client Ledger API
 # -----------------------------------------------------------------------------
 @router.get("/client-ledger/{client_id}", response_model=ClientLedgerModel)
-async def get_client_ledger(client_id: str):
-    ledger = await ledgers_collection.find_one({"client_id": client_id})
+async def get_client_ledger(client_id: str, db: ScopedDatabase = Depends(get_db)):
+    ledger = await db.ledgers.find_one({"client_id": client_id})
     if not ledger:
-        # Return empty ledger
         return ClientLedgerModel(client_id=client_id)
     return ledger
 
@@ -265,32 +240,30 @@ async def get_client_ledger(client_id: str):
 # Associate Payouts API
 # -----------------------------------------------------------------------------
 @router.get("/payouts", response_model=List[AssociatePayoutModel])
-async def get_payouts():
-    cursor = payouts_collection.find({}).sort("created_at", -1)
+async def get_payouts(db: ScopedDatabase = Depends(get_db)):
+    cursor = db.payouts.find({}).sort("created_at", -1)
     return await cursor.to_list(length=100)
 
 @router.post("/payouts", response_model=AssociatePayoutModel)
-async def create_payout(payout: AssociatePayoutModel):
-    await payouts_collection.insert_one(payout.model_dump())
+async def create_payout(payout: AssociatePayoutModel, db: ScopedDatabase = Depends(get_db)):
+    await db.payouts.insert_one(payout.model_dump())
     return payout
 
 # -----------------------------------------------------------------------------
 # Overview API
 # -----------------------------------------------------------------------------
 @router.get("/overview")
-async def get_overview():
-    # Calculate totals
+async def get_overview(db: ScopedDatabase = Depends(get_db)):
     pipeline = [
         {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}}
     ]
-    cursor = transactions_collection.aggregate(pipeline)
+    cursor = db.transactions.aggregate(pipeline)
     totals = {doc["_id"]: doc["total"] for doc in await cursor.to_list(length=None)}
     
     income = totals.get("income", 0.0)
     expenses = totals.get("expense", 0.0)
     
-    # Outstanding Receivables
-    ledger_cursor = ledgers_collection.aggregate([
+    ledger_cursor = db.ledgers.aggregate([
         {"$group": {"_id": None, "total_balance": {"$sum": "$balance_amount"}}}
     ])
     receivables_doc = await ledger_cursor.to_list(length=1)
