@@ -7,6 +7,7 @@ from routes.deps import create_access_token
 from datetime import datetime
 from logging_config import get_logger
 import os
+from config import config
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 logger = get_logger("auth")
@@ -98,6 +99,8 @@ async def google_login(token_data: dict = Body(...)):
 @router.get("/dev/users")
 async def list_dev_users():
     """[DEV ONLY] List all users for dev login selector."""
+    if config.ENV == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
     logger.debug("Dev endpoint: listing users")
     users = await users_collection.find({}).to_list(100)
     return [
@@ -115,6 +118,8 @@ async def list_dev_users():
 @router.post("/dev/login/{user_id}")
 async def dev_login(user_id: str):
     """[DEV ONLY] Issue a JWT for any user, bypassing Google OAuth."""
+    if config.ENV == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
     user_doc = await users_collection.find_one({"id": user_id})
     if not user_doc:
         logger.warning(f"Dev login failed: user not found", extra={"data": {"user_id": user_id}})
@@ -143,6 +148,8 @@ async def dev_login(user_id: str):
 @router.get("/dev/seed")
 async def seed_dev_users_endpoint():
     """[DEV ONLY] Seed test users."""
+    if config.ENV == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
     import uuid
     from models.user import UserModel
     

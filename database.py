@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from logging_config import get_logger
 from config import config
+import certifi
 
 logger = get_logger("database")
 
@@ -15,7 +16,10 @@ else:
     logger.error("MONGO_URI not found in configuration!")
 
 # 3. Initialize client
-client = AsyncIOMotorClient(uri, tlsAllowInvalidCertificates=True)
+if config.ENV == "production":
+    client = AsyncIOMotorClient(uri, tlsCAFile=certifi.where())
+else:
+    client = AsyncIOMotorClient(uri, tlsAllowInvalidCertificates=True)
 db = client[db_name]
 
 associates_collection = db.get_collection("associates")
