@@ -40,9 +40,9 @@ jobs:
 
       # 5️⃣ Run tests
       - name: Run tests
-  env:
-    MONGO_URI: ${{ secrets.MONGO_URI }}
-  run: pytest
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        run: pytest
 
       - name: Build Docker image
         run: docker build -t yugenhub-backend .
