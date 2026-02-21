@@ -25,13 +25,7 @@ from pymongo import MongoClient
 sync_client = MongoClient(config.MONGO_URI if hasattr(config, "MONGO_URI") and config.MONGO_URI else "mongodb://localhost:27017/")
 sync_db = sync_client["yugen_hub_test"]
 
-@pytest.fixture(scope="session")
-def event_loop():
-    import asyncio
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def test_db():
@@ -129,3 +123,8 @@ def member_auth_headers(test_member_user):
         expires_delta=timedelta(minutes=60)
     )
     return {"Authorization": f"Bearer {token}"}
+
+@pytest.fixture(scope="function", autouse=True)
+def reset_motor_client():
+    from database import client
+    client.reset()

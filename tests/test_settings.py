@@ -219,3 +219,98 @@ async def test_reset_config(async_client: AsyncClient, auth_headers: dict):
     resp = await async_client.post("/api/settings/reset-config", headers=auth_headers)
     assert resp.status_code == 200
     assert "reset" in resp.json()["message"].lower() or "defaults" in resp.json()["message"].lower()
+
+
+# ── Account Self-Edit ────────────────────────────────────────────────────────
+
+async def test_update_own_account(async_client: AsyncClient, auth_headers: dict):
+    """User can update their own name and phone."""
+    resp = await async_client.patch(
+        "/api/settings/account",
+        json={"name": "Updated Owner", "phone": "+1111111"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "Profile updated"
+
+    # Verify the update
+    get_resp = await async_client.get("/api/settings/account", headers=auth_headers)
+    assert get_resp.json()["name"] == "Updated Owner"
+    assert get_resp.json()["phone"] == "+1111111"
+
+    # Reset name for other tests
+    await async_client.patch(
+        "/api/settings/account",
+        json={"name": "Test Owner"},
+        headers=auth_headers,
+    )
+
+
+async def test_update_account_empty_name_rejected(async_client: AsyncClient, auth_headers: dict):
+    """Updating with an empty name should be rejected."""
+    resp = await async_client.patch(
+        "/api/settings/account",
+        json={"name": "  "},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+# ── Invite Creates Associate ─────────────────────────────────────────────────
+
+async def test_invite_creates_associate(async_client: AsyncClient, auth_headers: dict):
+    """Inviting a user should auto-create an In-house associate."""
+    test_email = "associate_test@example.com"
+
+    # Invite user
+    resp = await async_client.post(
+        "/api/settings/team/invite",
+        json={"email": test_email, "role": "member", "associate_role": "Photographer"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+
+    # Check that an associate was created
+    assoc_resp = await async_client.get(
+        "/api/associates?limit=50000",
+        headers=auth_headers,
+    )
+    assert assoc_resp.status_code == 200
+    associates = assoc_resp.json().get("data", [])
+    match = [a for a in associates if a.get("email_id") == test_email]
+    assert len(match) == 1
+    assert match[0]["employment_type"] == "In-house"
+    assert match[0]["primary_role"] == "Photographer"
+
+
+# ── Remove User With Associate Deactivation ──────────────────────────────────
+
+async def test_remove_user_deactivates_associate(async_client: AsyncClient, auth_headers: dict):
+    """Removing a user with deactivate_associate=true should deactivate the linked associate."""
+    test_email = "deactivate_test@example.com"
+
+    # Invite
+    invite_resp = await async_client.post(
+        "/api/settings/team/invite",
+        json={"email": test_email, "role": "member", "associate_role": "Editor"},
+        headers=auth_headers,
+    )
+    user_id = invite_resp.json()["user_id"]
+
+    # Remove with deactivate
+    del_resp = await async_client.delete(
+        f"/api/settings/team/{user_id}?deactivate_associate=true",
+        headers=auth_headers,
+    )
+    assert del_resp.status_code == 200
+
+    # Check associate is now inactive
+    assoc_resp = await async_client.get(
+        "/api/associates?limit=50000",
+        headers=auth_headers,
+    )
+    associates = assoc_resp.json().get("data", [])
+    match = [a for a in associates if a.get("email_id") == test_email]
+    assert len(match) == 1
+    assert match[0]["is_active"] is False
+
