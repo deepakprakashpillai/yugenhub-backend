@@ -55,13 +55,20 @@ async def google_login(token_data: dict = Body(...)):
         current_user = UserModel(**user_doc)
         
         # Only update if changed
-        update_data = {"last_login": datetime.now()}
+        update_data = {"last_login": datetime.now(), "status": "active"}
         if not current_user.google_id:
             update_data["google_id"] = google_id # Link account if not linked
         if picture and current_user.picture != picture:
             update_data["picture"] = picture
+        # Sync name from Google if it was auto-generated from email during invite
+        if name and (not current_user.name or current_user.name == current_user.email.split("@")[0].title()):
+            update_data["name"] = name
             
         await users_collection.update_one({"_id": user_doc["_id"]}, {"$set": update_data})
+        
+        # Use updated values for the response
+        response_name = update_data.get("name", current_user.name)
+        response_picture = update_data.get("picture", current_user.picture)
         
         # 4. Issue Internal JWT
         access_token = create_access_token(
@@ -78,11 +85,11 @@ async def google_login(token_data: dict = Body(...)):
             "token_type": "bearer",
             "user": {
                 "id": current_user.id,
-                "name": current_user.name,
+                "name": response_name,
                 "email": current_user.email,
                 "role": current_user.role,
                 "agency_id": current_user.agency_id,
-                "picture": current_user.picture
+                "picture": response_picture
             }
         }
 

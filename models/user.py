@@ -5,15 +5,16 @@ import uuid
 
 class UserModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    google_id: str
+    google_id: Optional[str] = None
     email: EmailStr
     name: str
     picture: Optional[str] = None
     phone: Optional[str] = None
     agency_id: str
     role: Literal['owner', 'admin', 'member'] = "owner"
+    status: str = "active"
     created_at: datetime = Field(default_factory=datetime.now)
-    last_login: datetime = Field(default_factory=datetime.now)
+    last_login: Optional[datetime] = None
 
     model_config = ConfigDict(
         populate_by_name=True,

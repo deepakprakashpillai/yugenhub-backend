@@ -14,6 +14,7 @@ class AssociateModel(BaseModel):
     primary_role: Literal['Photographer', 'Cinematographer', 'Editor', 'Drone Pilot', 'Lead', 'Assistant']
     employment_type: Literal['In-house', 'Freelance', 'Contract'] = 'Freelance'
     is_active: bool = True
+    linked_user_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
     # NEW Pydantic V2 Syntax

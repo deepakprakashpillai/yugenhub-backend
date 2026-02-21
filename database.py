@@ -5,37 +5,84 @@ import certifi
 
 logger = get_logger("database")
 
-# 1. Get the URI and DB Name from config
 uri = config.MONGO_URI
 db_name = config.DB_NAME
 
-# 2. Log connection status
 if uri:
     logger.info(f"MongoDB connection string found: {uri[:20]}...")
 else:
     logger.error("MONGO_URI not found in configuration!")
 
-# 3. Initialize client
-if config.ENV == "production":
-    client = AsyncIOMotorClient(uri, tlsCAFile=certifi.where())
-else:
-    client = AsyncIOMotorClient(uri, tlsAllowInvalidCertificates=True)
-db = client[db_name]
+class DatabaseProxy:
+    def __init__(self):
+        self._client = None
+        self._db = None
 
-associates_collection = db.get_collection("associates")
-clients_collection = db.get_collection("clients")
-configs_collection = db.get_collection("agency_configs")
-projects_collection = db.get_collection("projects")
-users_collection = db.get_collection("users")
-tasks_collection = db.get_collection("tasks")
-task_history_collection = db.get_collection("task_history")
-notifications_collection = db.get_collection("notifications")
+    def initialize(self):
+        if self._client is None:
+            if config.ENV == "production":
+                self._client = AsyncIOMotorClient(uri, tlsCAFile=certifi.where())
+            else:
+                self._client = AsyncIOMotorClient(uri, tlsAllowInvalidCertificates=True)
+            self._db = self._client[db_name]
+            logger.info(f"Database collections initialized on DB: {db_name}")
+
+    def reset(self):
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+            self._db = None
+
+    def __getattr__(self, name):
+        self.initialize()
+        return getattr(self._client, name)
+
+    def __getitem__(self, name):
+        self.initialize()
+        return self._client[name]
+
+
+client = DatabaseProxy()
+
+class DBProxy:
+    def get_collection(self, name):
+        return client[db_name][name]
+
+    def __getattr__(self, attr):
+        return client[db_name][attr]
+        
+    def __getitem__(self, key):
+        return client[db_name][key]
+
+db = DBProxy()
+
+class AsyncCollectionProxy:
+    def __init__(self, name):
+        self.name = name
+
+    def _get_collection(self):
+        # We access the configured db dynamically
+        return db.get_collection(self.name)
+
+    def __getattr__(self, attr):
+        return getattr(self._get_collection(), attr)
+        
+    def __getitem__(self, key):
+        return self._get_collection()[key]
+
+users_collection = AsyncCollectionProxy("users")
+associates_collection = AsyncCollectionProxy("associates")
+clients_collection = AsyncCollectionProxy("clients")
+configs_collection = AsyncCollectionProxy("agency_configs")
+projects_collection = AsyncCollectionProxy("projects")
+tasks_collection = AsyncCollectionProxy("tasks")
+task_history_collection = AsyncCollectionProxy("task_history")
+notifications_collection = AsyncCollectionProxy("notifications")
 
 # Finance Collections
-accounts_collection = db.get_collection("finance_accounts")
-transactions_collection = db.get_collection("finance_transactions")
-ledgers_collection = db.get_collection("finance_ledgers")
-invoices_collection = db.get_collection("finance_invoices")
-payouts_collection = db.get_collection("finance_payouts")
+accounts_collection = AsyncCollectionProxy("finance_accounts")
+transactions_collection = AsyncCollectionProxy("finance_transactions")
+ledgers_collection = AsyncCollectionProxy("finance_ledgers")
+invoices_collection = AsyncCollectionProxy("finance_invoices")
+payouts_collection = AsyncCollectionProxy("finance_payouts")
 
-logger.info(f"Database collections initialized on DB: {db_name}")

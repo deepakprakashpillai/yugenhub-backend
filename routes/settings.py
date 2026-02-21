@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Query
 from typing import Optional, List, Dict, Any
 # REMOVED raw collection imports
 from models.user import UserModel
@@ -118,15 +118,40 @@ async def get_team(current_user: UserModel = Depends(get_current_user), db: Scop
     ])
 
 
+async def sync_user_to_associate(db: ScopedDatabase, user_data: dict, associate_role: str = "Lead"):
+    """Auto-create an In-house associate record for a new team member."""
+    email = user_data.get("email")
+    if not email:
+        return
+    # Check if an associate with this email already exists
+    existing = await db.associates.find_one({"email_id": email})
+    if existing:
+        return
+    associate = {
+        "name": user_data.get("name", "Unknown"),
+        "phone_number": user_data.get("phone", ""),
+        "email_id": email,
+        "primary_role": associate_role,
+        "employment_type": "In-house",
+        "is_active": True,
+        "linked_user_id": user_data.get("id"),
+        "agency_id": user_data.get("agency_id"),
+        "created_at": datetime.now(),
+    }
+    await db.associates.insert_one(associate)
+    logger.info(f"Auto-created associate for invited user", extra={"data": {"email": email}})
+
+
 @router.post("/team/invite")
 async def invite_user(
     invite_data: dict = Body(...),
     current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
-    """Invite a user by email. Creates a pending user record."""
+    """Invite a user by email. Creates a pending user record and an In-house associate."""
     email = invite_data.get("email", "").strip().lower()
     role = invite_data.get("role", "member")
+    associate_role = invite_data.get("associate_role", "Lead")
 
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -161,9 +186,13 @@ async def invite_user(
     }
 
     await db.users.insert_one(new_user)
+
+    # Auto-create In-house associate
+    await sync_user_to_associate(db, new_user, associate_role)
+
     logger.info(
         f"User invited",
-        extra={"data": {"email": email, "role": role, "invited_by": current_user.email, "agency_id": current_user.agency_id}}
+        extra={"data": {"email": email, "role": role, "associate_role": associate_role, "invited_by": current_user.email, "agency_id": current_user.agency_id}}
     )
     return {"message": f"Invitation sent to {email}", "user_id": new_user["id"]}
 
@@ -261,10 +290,11 @@ async def update_user_details(
 @router.delete("/team/{user_id}")
 async def remove_user(
     user_id: str,
+    deactivate_associate: bool = Query(False, description="Also deactivate linked associate"),
     current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
-    """Remove a user from the agency."""
+    """Remove a user from the agency. Optionally deactivate linked associate."""
     target = await db.users.find_one({
         "id": user_id
     })
@@ -282,6 +312,14 @@ async def remove_user(
     # Admin cannot remove other admins
     if current_user.role == "admin" and target.get("role") == "admin":
         raise HTTPException(status_code=403, detail="Admins cannot remove other admins")
+
+    # Optionally deactivate linked associate
+    if deactivate_associate and target.get("email"):
+        await db.associates.update_one(
+            {"email_id": target["email"]},
+            {"$set": {"is_active": False}}
+        )
+        logger.info(f"Deactivated linked associate", extra={"data": {"email": target["email"]}})
 
     await db.users.delete_one({
         "id": user_id
@@ -609,7 +647,33 @@ async def get_account(current_user: UserModel = Depends(get_current_user)):
         "role": current_user.role,
         "agency_id": current_user.agency_id,
         "picture": current_user.picture,
+        "phone": current_user.phone,
     }
+
+
+@router.patch("/account")
+async def update_account(
+    updates: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update current user's own profile (name, phone)."""
+    allowed_fields = {"name", "phone"}
+    filtered = {k: v for k, v in updates.items() if k in allowed_fields}
+
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    # Validate name is not empty
+    if "name" in filtered and not filtered["name"].strip():
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+
+    await db.users.update_one({"id": current_user.id}, {"$set": filtered})
+    logger.info(
+        f"Account updated",
+        extra={"data": {"user_id": current_user.id, "fields": list(filtered.keys())}}
+    )
+    return {"message": "Profile updated"}
 
 
 # ─── DANGER ZONE ─────────────────────────────────────────────────────────────
