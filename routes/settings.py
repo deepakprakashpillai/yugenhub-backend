@@ -350,11 +350,25 @@ async def get_workflow(current_user: UserModel = Depends(get_current_user), db: 
         elif "fixed" not in opt:
             opt["fixed"] = False
 
+    # Helper function to rescue flat string arrays that were accidentally seeded as dicts
+    def coerce_to_strings(array_data):
+        if not array_data:
+            return []
+        coerced = []
+        for item in array_data:
+            if isinstance(item, dict):
+                # Attempt to extract 'label' or 'name' or 'id', defaulting to str(item)
+                val = item.get("label") or item.get("name") or item.get("id") or str(item)
+                coerced.append(val)
+            else:
+                coerced.append(str(item))
+        return coerced
+
     return parse_mongo_data({
         "status_options": status_options,
-        "lead_sources": config.get("lead_sources", DEFAULT_AGENCY_CONFIG["lead_sources"]),
-        "deliverable_types": config.get("deliverable_types", DEFAULT_AGENCY_CONFIG["deliverable_types"]),
-        "associate_roles": config.get("associate_roles", DEFAULT_AGENCY_CONFIG.get("associate_roles", [])),
+        "lead_sources": coerce_to_strings(config.get("lead_sources", DEFAULT_AGENCY_CONFIG["lead_sources"])),
+        "deliverable_types": coerce_to_strings(config.get("deliverable_types", DEFAULT_AGENCY_CONFIG["deliverable_types"])),
+        "associate_roles": coerce_to_strings(config.get("associate_roles", DEFAULT_AGENCY_CONFIG.get("associate_roles", []))),
     })
 
 
