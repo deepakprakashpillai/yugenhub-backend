@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, BackgroundTasks
 from typing import Optional, List, Dict, Any
 # REMOVED raw collection imports
 from models.user import UserModel
@@ -6,6 +6,8 @@ from models.notification_prefs import NotificationPrefsModel
 from routes.deps import get_current_user, get_db
 from middleware.db_guard import ScopedDatabase
 from defaults import DEFAULT_AGENCY_CONFIG
+from config import config
+from utils.email import send_invite_email, send_role_change_email
 from logging_config import get_logger
 from datetime import datetime
 import uuid
@@ -144,6 +146,7 @@ async def sync_user_to_associate(db: ScopedDatabase, user_data: dict, associate_
 
 @router.post("/team/invite")
 async def invite_user(
+    background_tasks: BackgroundTasks,
     invite_data: dict = Body(...),
     current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
@@ -190,6 +193,11 @@ async def invite_user(
     # Auto-create In-house associate
     await sync_user_to_associate(db, new_user, associate_role)
 
+    # Trigger email
+    org_config = await get_or_create_config(db)
+    org_name = org_config.get("org_name", "My Agency")
+    background_tasks.add_task(send_invite_email, email, org_name, config.FRONTEND_URL, role)
+
     logger.info(
         f"User invited",
         extra={"data": {"email": email, "role": role, "associate_role": associate_role, "invited_by": current_user.email, "agency_id": current_user.agency_id}}
@@ -200,6 +208,7 @@ async def invite_user(
 @router.patch("/team/{user_id}/role")
 async def change_user_role(
     user_id: str,
+    background_tasks: BackgroundTasks,
     role_data: dict = Body(...),
     current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
@@ -231,6 +240,13 @@ async def change_user_role(
         {"id": user_id},
         {"$set": {"role": new_role}}
     )
+    
+    # Trigger email if target is not the same as current_user
+    if target["id"] != current_user.id:
+        org_config = await get_or_create_config(db)
+        org_name = org_config.get("org_name", "My Agency")
+        background_tasks.add_task(send_role_change_email, target["email"], org_name, new_role, config.FRONTEND_URL)
+
     logger.info(
         f"Role changed",
         extra={"data": {"target_user": user_id, "new_role": new_role, "changed_by": current_user.id}}
@@ -350,11 +366,25 @@ async def get_workflow(current_user: UserModel = Depends(get_current_user), db: 
         elif "fixed" not in opt:
             opt["fixed"] = False
 
+    # Helper function to rescue flat string arrays that were accidentally seeded as dicts
+    def coerce_to_strings(array_data):
+        if not array_data:
+            return []
+        coerced = []
+        for item in array_data:
+            if isinstance(item, dict):
+                # Attempt to extract 'label' or 'name' or 'id', defaulting to str(item)
+                val = item.get("label") or item.get("name") or item.get("id") or str(item)
+                coerced.append(val)
+            else:
+                coerced.append(str(item))
+        return coerced
+
     return parse_mongo_data({
         "status_options": status_options,
-        "lead_sources": config.get("lead_sources", DEFAULT_AGENCY_CONFIG["lead_sources"]),
-        "deliverable_types": config.get("deliverable_types", DEFAULT_AGENCY_CONFIG["deliverable_types"]),
-        "associate_roles": config.get("associate_roles", DEFAULT_AGENCY_CONFIG.get("associate_roles", [])),
+        "lead_sources": coerce_to_strings(config.get("lead_sources", DEFAULT_AGENCY_CONFIG["lead_sources"])),
+        "deliverable_types": coerce_to_strings(config.get("deliverable_types", DEFAULT_AGENCY_CONFIG["deliverable_types"])),
+        "associate_roles": coerce_to_strings(config.get("associate_roles", DEFAULT_AGENCY_CONFIG.get("associate_roles", []))),
     })
 
 

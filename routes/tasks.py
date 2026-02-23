@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, HTTPException, Depends, Query
+from fastapi import APIRouter, Body, HTTPException, Depends, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 # REMOVED raw collection imports
@@ -8,6 +8,8 @@ from models.user import UserModel
 from routes.deps import get_current_user, get_db
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
+from config import config
+from utils.email import send_task_assignment_email
 import uuid
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
@@ -188,6 +190,7 @@ async def list_tasks_grouped(
 
 @router.post("", status_code=201)
 async def create_task(
+    background_tasks: BackgroundTasks,
     task: TaskModel = Body(...),
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -245,6 +248,25 @@ async def create_task(
             }
         )
         await db.notifications.insert_one(notification.model_dump())
+        # 4. Trigger Email
+        try:
+            assignee_data = await db.users.find_one({"id": task.assigned_to})
+            if assignee_data and assignee_data.get("email"):
+                org_config = await db.agency_configs.find_one({})
+                org_name = org_config.get("org_name", "My Agency") if org_config else "My Agency"
+                background_tasks.add_task(
+                    send_task_assignment_email,
+                    to_email=assignee_data["email"],
+                    org_name=org_name,
+                    task_title=task.title,
+                    assigner_name=assigner_name,
+                    project_title=project_title,
+                    due_date=task.due_date,
+                    frontend_url=config.FRONTEND_URL
+                )
+        except Exception as e:
+            logger.error(f"Failed to queue task assignment email: {e}")
+            
         logger.info(f"Task assignment notification sent", extra={"data": {"task_id": task.id, "assignee": task.assigned_to}})
     
     logger.info(f"Task created", extra={"data": {"task_id": task.id, "title": task.title, "type": task.type, "project_id": task.project_id}})
@@ -407,6 +429,7 @@ async def list_tasks(
 @router.patch("/{task_id}")
 async def update_task(
     task_id: str,
+    background_tasks: BackgroundTasks,
     update_data: Dict[str, Any] = Body(...),
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -501,6 +524,25 @@ async def update_task(
                 }
             )
             await db.notifications.insert_one(notification.model_dump())
+            # 4. Trigger Email
+            try:
+                assignee_data = await db.users.find_one({"id": new_assignee})
+                if assignee_data and assignee_data.get("email"):
+                    org_config = await db.agency_configs.find_one({})
+                    org_name = org_config.get("org_name", "My Agency") if org_config else "My Agency"
+                    background_tasks.add_task(
+                        send_task_assignment_email,
+                        to_email=assignee_data["email"],
+                        org_name=org_name,
+                        task_title=current_title,
+                        assigner_name=assigner_name,
+                        project_title=project_title,
+                        due_date=due_date,
+                        frontend_url=config.FRONTEND_URL
+                    )
+            except Exception as e:
+                logger.error(f"Failed to queue task reassignment email: {e}")
+                
             logger.info(f"Task reassignment notification sent", extra={"data": {"task_id": task_id, "new_assignee": new_assignee}})
     
     logger.info(f"Task updated", extra={"data": {"task_id": task_id, "fields_changed": list(changes.keys())}})

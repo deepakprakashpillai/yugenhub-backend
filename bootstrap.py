@@ -90,13 +90,13 @@ async def bootstrap_db():
             {"id": "cancelled", "label": "Cancelled", "color": "#ef4444"}
         ],
         "lead_sources": [
-            {"id": "instagram", "label": "Instagram"}
+            "Instagram", "Website", "Referral"
         ],
         "deliverable_types": [
-            {"id": "traditional_photos", "label": "Traditional Photos"}
+            "Traditional Photos", "Cinematic Film", "Raw Photos"
         ],
         "associate_roles": [
-            {"id": "lead_photographer", "label": "Lead Photographer"}
+            "Lead Photographer", "Cinematographer", "Editor"
         ],
         "finance_categories": [
             {"id": "software_subscriptions", "label": "Software & Subscriptions", "type": "expense"},

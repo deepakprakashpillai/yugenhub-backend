@@ -40,7 +40,7 @@ def test_db():
             "theme_mode": "dark",
             "accent_color": "#ef4444",
             "verticals": [{"id": "wedding", "label": "Wedding Photography"}],
-            "lead_sources": [{"id": "web", "label": "Website"}],
+            "lead_sources": ["Website"],
             "project_statuses": [{"id": "enquiry", "label": "Enquiry"}],
             "status_options": [
                 {"id": "enquiry", "label": "Enquiry", "color": "#aaa", "fixed": True},
@@ -49,8 +49,8 @@ def test_db():
                 {"id": "completed", "label": "Completed", "color": "#ddd", "fixed": True},
                 {"id": "cancelled", "label": "Cancelled", "color": "#eee", "fixed": True},
             ],
-            "deliverable_types": [{"id": "photo", "label": "Photo"}],
-            "associate_roles": [{"id": "photographer", "label": "Photographer"}],
+            "deliverable_types": ["Photo"],
+            "associate_roles": ["Photographer"],
             "finance_categories": [
                 {"id": "operations", "label": "Operations"},
                 {"id": "salary", "label": "Salary"},
