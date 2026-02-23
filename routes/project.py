@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, BackgroundTasks
 import re # IMPORTED
 from bson import ObjectId
 from datetime import datetime
@@ -12,12 +12,14 @@ from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from fastapi import Depends
 from logging_config import get_logger
+from config import config
+from utils.email import send_event_assignment_email
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
 
 # --- HELPER: Notify Associate on Assignment ---
-async def notify_associate_assignment(db: ScopedDatabase, associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
+async def notify_associate_assignment(db: ScopedDatabase, background_tasks: BackgroundTasks, associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
     """
     Send a notification to an associate when they are assigned to an event.
     Looks up the associate's email, finds the corresponding user, and creates notification.
@@ -58,6 +60,24 @@ async def notify_associate_assignment(db: ScopedDatabase, associate_id: str, pro
     )
     
     await db.notifications.insert_one(notification.model_dump())
+    
+    # Send Email!
+    try:
+        org_config = await db.agency_configs.find_one({})
+        org_name = org_config.get("org_name", "My Agency") if org_config else "My Agency"
+        background_tasks.add_task(
+            send_event_assignment_email,
+            to_email=user.get("email"), # This comes from the linked user's data
+            org_name=org_name,
+            associate_name=associate.get("name", "Associate"),
+            project_code=project_code,
+            event_type=event_type,
+            event_date=event_date,
+            frontend_url=config.FRONTEND_URL
+        )
+    except Exception as e:
+        logger.error(f"Failed to queue event assignment email: {e}")
+
     logger.info(f"Notification sent to associate for event assignment", extra={"data": {"associate": associate.get('name'), "project": project_code, "event": event_type}})
 
 # --- HELPER FUNCTION ---
@@ -98,6 +118,7 @@ async def get_next_sequence_value(db: ScopedDatabase, vertical: str) -> str:
 
 @router.post("", status_code=201)
 async def create_project(
+    background_tasks: BackgroundTasks,
     project: ProjectModel = Body(...), 
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -168,6 +189,7 @@ async def create_project(
                 for assignment in event.assignments:
                     await notify_associate_assignment(
                         db,
+                        background_tasks,
                         assignment.associate_id,
                         project_data["code"],
                         event.type,
@@ -576,6 +598,7 @@ async def update_event(
 async def add_assignment(
     project_id: str, 
     event_id: str, 
+    background_tasks: BackgroundTasks,
     assignment: AssignmentModel = Body(...), 
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -609,6 +632,7 @@ async def add_assignment(
     # Send notification to the assigned associate
     await notify_associate_assignment(
         db, # Pass db dependency
+        background_tasks,
         assignment.associate_id, 
         project.get("code", "Unknown"), 
         event_type,
