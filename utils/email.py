@@ -19,8 +19,11 @@ def send_email(to_email: str, subject: str, html_content: str):
         return None
 
     try:
+        # Include a display name!
+        sender = f"Yugen Hub <{config.MAIL_FROM}>"
+        
         params = {
-            "from": config.MAIL_FROM,
+            "from": sender,
             "to": [to_email],
             "subject": subject,
             "html": html_content,
