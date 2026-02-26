@@ -104,6 +104,7 @@ DEFAULT_AGENCY_CONFIG = {
             "label": "Knots",
             "description": "Weddings",
             "type": "wedding",
+            "include_in_finance_summary": True,
             "fields": []
         },
         {
@@ -111,6 +112,7 @@ DEFAULT_AGENCY_CONFIG = {
             "label": "Pluto",
             "description": "Kids",
             "type": "children",
+            "include_in_finance_summary": True,
             "fields": []
         },
         {
@@ -118,6 +120,7 @@ DEFAULT_AGENCY_CONFIG = {
             "label": "Festia",
             "description": "Events",
             "type": "general",
+            "include_in_finance_summary": True,
             "fields": [
                 {"name": "event_scale", "label": "Scale", "type": "select", "options": ["Private", "Corporate", "Mass"]},
                 {"name": "company_name", "label": "Company Name", "type": "text", "options": []},
@@ -128,6 +131,7 @@ DEFAULT_AGENCY_CONFIG = {
             "label": "Thryv",
             "description": "Marketing",
             "type": "general",
+            "include_in_finance_summary": True,
             "fields": [
                 {"name": "service_type", "label": "Service", "type": "text", "options": []},
             ]

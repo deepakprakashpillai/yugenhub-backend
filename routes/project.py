@@ -7,7 +7,7 @@ from database import notifications_collection
 from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, get_user_verticals
 from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from fastapi import Depends
@@ -136,6 +136,11 @@ async def create_project(
             status_code=400, 
             detail=f"Invalid vertical. Allowed: {allowed_verticals}"
         )
+    
+    # 3. RBAC: Check user has access to this vertical
+    user_verticals = await get_user_verticals(current_user, db)
+    if project.vertical not in user_verticals:
+        raise HTTPException(status_code=403, detail="You don't have access to this vertical")
 
     # 3. Automatic Code Generation
     # If code is missing or placeholder-y, generate a sequential one
@@ -221,9 +226,16 @@ async def list_projects(
     # Guardrail handles agency_id, so we just build the rest of the query
     query = {}
     
-    # 1. Filters
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     if vertical:
+        # If requesting a specific vertical, verify access
+        if vertical not in user_verticals:
+            return {"total": 0, "page": page, "limit": limit, "data": []}
         query["vertical"] = vertical
+    else:
+        # Scope to all allowed verticals
+        query["vertical"] = {"$in": user_verticals}
 
     # View Logic (Supercedes Status if View is specific)
     # Status filter is applied ON TOP of View if provided (e.g. View=Ongoing + Status=Enquiry)
@@ -385,6 +397,11 @@ async def get_project(id: str, current_user: UserModel = Depends(get_current_use
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
+    # RBAC: Check vertical access
+    user_verticals = await get_user_verticals(current_user, db)
+    if project.get("vertical") and project["vertical"] not in user_verticals:
+        raise HTTPException(status_code=404, detail="Project not found")  # 404 not 403 for seamless invisibility
+    
     return parse_mongo_data(project)
 
 @router.delete("/{id}")
@@ -395,6 +412,13 @@ async def delete_project(id: str, current_user: UserModel = Depends(get_current_
     
     # Cascade Delete Tasks (db.tasks uses studio_id automatically)
     await db.tasks.delete_many({"project_id": id})
+
+    # RBAC: Check vertical access before deleting
+    project = await db.projects.find_one({"_id": ObjectId(id)})
+    if project:
+        user_verticals = await get_user_verticals(current_user, db)
+        if project.get("vertical") and project["vertical"] not in user_verticals:
+            raise HTTPException(status_code=404, detail="Project not found")
 
     result = await db.projects.delete_one({"_id": ObjectId(id)})
     
@@ -428,8 +452,15 @@ async def delete_event(project_id: str, event_id: str, current_user: UserModel =
 async def get_project_stats(vertical: str = None, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """READ STATS: Get overview metrics for the vertical/dashboard"""
     base_query = {}
+    
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     if vertical:
+        if vertical not in user_verticals:
+            return {"total": 0, "active": 0, "ongoing": 0, "this_month": 0}
         base_query["vertical"] = vertical
+    else:
+        base_query["vertical"] = {"$in": user_verticals}
 
     # 1. Total Projects
     total = await db.projects.count_documents(base_query)

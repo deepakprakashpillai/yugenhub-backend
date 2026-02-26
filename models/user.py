@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from datetime import datetime
 import uuid
 
@@ -15,6 +15,9 @@ class UserModel(BaseModel):
     status: str = "active"
     created_at: datetime = Field(default_factory=datetime.now)
     last_login: Optional[datetime] = None
+    # RBAC: Per-user access control
+    allowed_verticals: List[str] = Field(default_factory=list)  # Empty = all verticals
+    finance_access: bool = False  # Explicit finance module access (owner/admin get it by default via role)
 
     model_config = ConfigDict(
         populate_by_name=True,

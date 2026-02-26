@@ -89,7 +89,8 @@ async def google_login(token_data: dict = Body(...)):
                 "email": current_user.email,
                 "role": current_user.role,
                 "agency_id": current_user.agency_id,
-                "picture": response_picture
+                "picture": response_picture,
+                "finance_access": current_user.finance_access,
             }
         }
 
@@ -117,6 +118,7 @@ async def list_dev_users():
             "email": u.get("email"),
             "role": u.get("role", "member"),
             "picture": u.get("picture"),
+            "finance_access": u.get("finance_access", False),
         }
         for u in users
     ]
@@ -149,6 +151,7 @@ async def dev_login(user_id: str):
             "role": user.role,
             "agency_id": user.agency_id,
             "picture": user.picture,
+            "finance_access": user.finance_access,
         },
     }
 

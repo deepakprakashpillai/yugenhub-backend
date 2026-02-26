@@ -7,7 +7,7 @@ from database import users_collection
 # BUT `db` variable is local to endpoints. The helper needs `db` passed to it.
 
 from models.associate import AssociateModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, require_role
 from models.user import UserModel
 from fastapi import Depends
 from middleware.db_guard import ScopedDatabase
@@ -174,7 +174,7 @@ async def get_associate(id: str, current_user: UserModel = Depends(get_current_u
 @router.post("", status_code=201)
 async def create_associate(
     associate: AssociateModel = Body(...), 
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
     """CREATE: Add a new associate"""
@@ -236,7 +236,7 @@ async def update_associate(
     return updated_doc
 
 @router.delete("/{associate_id}")
-async def delete_associate(associate_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
+async def delete_associate(associate_id: str, current_user: UserModel = Depends(require_role("owner", "admin")), db: ScopedDatabase = Depends(get_db)):
     """DELETE: Remove an associate"""
     if not ObjectId.is_valid(associate_id):
         raise HTTPException(status_code=400, detail="Invalid Associate ID format")

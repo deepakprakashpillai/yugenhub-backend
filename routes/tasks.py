@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from models.task import TaskModel, TaskHistoryModel
 from models.notification import NotificationModel
 from models.user import UserModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, get_user_verticals
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 from config import config
@@ -100,6 +100,9 @@ async def list_tasks_grouped(
     now = datetime.now()
     thirty_days_ago = now - timedelta(days=30)
 
+    # RBAC: Get user's allowed verticals for filtering project-linked tasks
+    user_verticals = await get_user_verticals(current_user, db)
+
     pipeline = [
         {"$match": match_stage},
         # For done tasks, only include last 30 days
@@ -116,6 +119,13 @@ async def list_tasks_grouped(
             "localField": "project_oid",
             "foreignField": "_id",
             "as": "project_info"
+        }},
+        # RBAC: Filter out tasks linked to verticals user can't access
+        {"$match": {
+            "$or": [
+                {"project_info": {"$size": 0}},  # Standalone tasks (no project) are always visible
+                {"project_info.vertical": {"$in": user_verticals}}  # Project's vertical is allowed
+            ]
         }},
         {"$addFields": {
             "project_name": {"$arrayElemAt": ["$project_info.title", 0]},
@@ -357,6 +367,17 @@ async def list_tasks(
             "localField": "project_oid",
             "foreignField": "_id",
             "as": "project_info"
+        }
+    })
+
+    # RBAC: Filter out tasks linked to verticals user can't access
+    user_verticals = await get_user_verticals(current_user, db)
+    pipeline.append({
+        "$match": {
+            "$or": [
+                {"project_info": {"$size": 0}},  # Standalone tasks always visible
+                {"project_info.vertical": {"$in": user_verticals}}
+            ]
         }
     })
     

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from models.user import UserModel
 # REMOVED raw collection imports
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, get_user_verticals
 from middleware.db_guard import ScopedDatabase
 from datetime import datetime, timedelta
 from bson import ObjectId
@@ -31,8 +31,13 @@ async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user
     # current_agency_id handled by db wrapper
     now = datetime.now()
     
-    # Base Stats (Global)
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
+    vertical_filter = {"vertical": {"$in": user_verticals}}
+    
+    # Base Stats (Scoped by verticals)
     active_projects = await db.projects.count_documents({
+        **vertical_filter,
         "status": {"$ne": "completed"}
     })
     
@@ -215,9 +220,12 @@ async def get_workload_stats(scope: str = "global", current_user: UserModel = De
 @router.get("/pipeline")
 async def get_project_pipeline(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Get active project distribution by Vertical"""
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     pipeline = [
         {"$match": {
-            "status": {"$ne": "completed"} # Exclude completed
+            "vertical": {"$in": user_verticals},
+            "status": {"$ne": "completed"}
         }},
         {"$group": {"_id": "$vertical", "count": {"$sum": 1}}}
     ]
@@ -232,7 +240,11 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
     now = datetime.now()
     next_2_weeks = now + timedelta(days=14) 
     
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
+    
     pipeline = [
+        {"$match": {"vertical": {"$in": user_verticals}}},
         {"$unwind": "$events"},
         {"$match": {
             "events.start_date": {"$gte": now, "$lte": next_2_weeks}

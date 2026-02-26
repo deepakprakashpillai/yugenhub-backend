@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 # REMOVED raw collection imports
 from models.user import UserModel
 from models.notification_prefs import NotificationPrefsModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, require_role, get_user_verticals
 from middleware.db_guard import ScopedDatabase
 from defaults import DEFAULT_AGENCY_CONFIG
 from config import config
@@ -15,21 +15,6 @@ import copy
 
 router = APIRouter(prefix="/api/settings", tags=["Settings"])
 logger = get_logger("settings")
-
-
-# ─── RBAC Helpers ────────────────────────────────────────────────────────────
-
-def require_role(*allowed_roles):
-    """Dependency that checks if the current user has one of the allowed roles."""
-    async def checker(current_user: UserModel = Depends(get_current_user)):
-        if current_user.role not in allowed_roles:
-            logger.warning(
-                f"Access denied: requires {allowed_roles}",
-                extra={"data": {"user_id": current_user.id, "role": current_user.role}}
-            )
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return current_user
-    return checker
 
 
 def parse_mongo_data(data):
@@ -103,9 +88,11 @@ async def update_org(
 async def get_team(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """List all team members for this agency."""
     users = await db.users.find({}).to_list(1000)
+    is_owner = current_user.role == "owner"
 
-    return parse_mongo_data([
-        {
+    result = []
+    for u in users:
+        member = {
             "id": u.get("id"),
             "name": u.get("name", "Unknown"),
             "email": u.get("email"),
@@ -116,8 +103,13 @@ async def get_team(current_user: UserModel = Depends(get_current_user), db: Scop
             "last_login": u.get("last_login"),
             "created_at": u.get("created_at"),
         }
-        for u in users
-    ])
+        # Only owner can see access control fields
+        if is_owner:
+            member["allowed_verticals"] = u.get("allowed_verticals", [])
+            member["finance_access"] = u.get("finance_access", False)
+        result.append(member)
+
+    return parse_mongo_data(result)
 
 
 async def sync_user_to_associate(db: ScopedDatabase, user_data: dict, associate_role: str = "Lead"):
@@ -155,6 +147,8 @@ async def invite_user(
     email = invite_data.get("email", "").strip().lower()
     role = invite_data.get("role", "member")
     associate_role = invite_data.get("associate_role", "Lead")
+    allowed_verticals = invite_data.get("allowed_verticals", [])  # RBAC: vertical access
+    finance_access = invite_data.get("finance_access", False)     # RBAC: finance access
 
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -165,6 +159,11 @@ async def invite_user(
     # Admin cannot invite with owner role
     if current_user.role == "admin" and role == "owner":
         raise HTTPException(status_code=403, detail="Admins cannot assign owner role")
+    
+    # Only owner can set access controls
+    if current_user.role != "owner":
+        allowed_verticals = []
+        finance_access = False
 
     # Check if user already exists in this agency
     existing = await db.users.find_one({
@@ -186,6 +185,8 @@ async def invite_user(
         "created_at": datetime.now(),
         "last_login": None,
         "invited_by": current_user.id,
+        "allowed_verticals": allowed_verticals,
+        "finance_access": finance_access,
     }
 
     await db.users.insert_one(new_user)
@@ -345,6 +346,47 @@ async def remove_user(
         extra={"data": {"removed_user": user_id, "removed_by": current_user.id, "agency_id": current_user.agency_id}}
     )
     return {"message": "User removed"}
+
+
+@router.patch("/team/{user_id}/access")
+async def update_user_access(
+    user_id: str,
+    access_data: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner")),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update a user's vertical and finance access. Owner only."""
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Cannot modify own access (owner always has full access)
+    if target["id"] == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot modify your own access")
+
+    update_fields = {}
+    if "allowed_verticals" in access_data:
+        av = access_data["allowed_verticals"]
+        if not isinstance(av, list):
+            raise HTTPException(status_code=400, detail="allowed_verticals must be a list")
+        update_fields["allowed_verticals"] = av
+
+    if "finance_access" in access_data:
+        fa = access_data["finance_access"]
+        if not isinstance(fa, bool):
+            raise HTTPException(status_code=400, detail="finance_access must be a boolean")
+        update_fields["finance_access"] = fa
+
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No valid access fields to update")
+
+    await db.users.update_one({"id": user_id}, {"$set": update_fields})
+
+    logger.info(
+        f"User access updated",
+        extra={"data": {"target_user": user_id, "updated_by": current_user.id, "fields": list(update_fields.keys())}}
+    )
+    return {"message": "Access updated", "updated": list(update_fields.keys())}
 
 
 # ─── WORKFLOW CONFIG ─────────────────────────────────────────────────────────
@@ -531,11 +573,23 @@ async def delete_status(
 
 @router.get("/verticals")
 async def get_verticals(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
-    """Get verticals configuration."""
-    config = await get_or_create_config(db)
-    return parse_mongo_data({
-        "verticals": config.get("verticals", DEFAULT_AGENCY_CONFIG["verticals"]),
-    })
+    """Get verticals configuration.
+    Owner sees all verticals. Others see only their allowed verticals (seamless invisibility).
+    """
+    cfg = await get_or_create_config(db)
+    all_verticals = cfg.get("verticals", DEFAULT_AGENCY_CONFIG["verticals"])
+    
+    # Owner always sees everything
+    if current_user.role == "owner":
+        return parse_mongo_data({"verticals": all_verticals})
+    
+    # Filter by user's allowed_verticals (empty = all)
+    user_allowed = current_user.allowed_verticals
+    if not user_allowed:
+        return parse_mongo_data({"verticals": all_verticals})
+    
+    filtered = [v for v in all_verticals if v.get("id") in user_allowed]
+    return parse_mongo_data({"verticals": filtered})
 
 
 @router.patch("/verticals")

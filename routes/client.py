@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Body, HTTPException, status, Query
 from typing import get_args
 from models.client import ClientModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, require_role
 from models.user import UserModel
 from fastapi import Depends
 from middleware.db_guard import ScopedDatabase
@@ -150,7 +150,7 @@ async def update_client(client_id: str, update_data: dict = Body(...), current_u
     return updated_client
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_client(client_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
+async def delete_client(client_id: str, current_user: UserModel = Depends(require_role("owner", "admin")), db: ScopedDatabase = Depends(get_db)):
     """DELETE: Remove a client"""
     if not ObjectId.is_valid(client_id):
         raise HTTPException(status_code=400, detail="Invalid Client ID format")
