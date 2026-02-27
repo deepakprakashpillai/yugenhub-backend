@@ -1,10 +1,11 @@
 # models/associate.py
-from pydantic import BaseModel, Field, EmailStr, ConfigDict # Add ConfigDict here
-from typing import Optional, Literal
+from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
+from typing import Optional, Literal, Any
 from datetime import datetime
 from bson import ObjectId
 
 class AssociateModel(BaseModel):
+    id: Optional[str] = None
     # Keep your fields exactly the same as before...
     agency_id: str = "default"
     name: str
@@ -17,9 +18,17 @@ class AssociateModel(BaseModel):
     linked_user_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
+    @field_validator("email_id", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v: Any) -> Any:
+        if v == "":
+            return None
+        return v
+
     # NEW Pydantic V2 Syntax
     model_config = ConfigDict(
         populate_by_name=True,
         arbitrary_types_allowed=True,
-        json_encoders={ObjectId: str}
+        json_encoders={ObjectId: str},
+        extra="ignore"
     )
