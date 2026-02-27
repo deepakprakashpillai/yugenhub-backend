@@ -29,6 +29,8 @@ sync_db = sync_client["yugen_hub_test"]
 
 @pytest.fixture(scope="session", autouse=True)
 def test_db():
+    # Ensure clean state from any previously crashed runs
+    sync_client.drop_database("yugen_hub_test")
     # Seed default config for project/settings/workflow validation
     sync_db.agency_configs.update_one(
         {"agency_id": "test_agency"},
