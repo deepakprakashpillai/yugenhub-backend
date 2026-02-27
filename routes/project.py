@@ -581,6 +581,7 @@ async def update_project(
     # Prevent updating immutable fields or fields handled by specific logic
     update_data.pop("_id", None)
     update_data.pop("events", None) 
+    update_data.pop("assignments", None)  # Handled by dedicated endpoints
     update_data.pop("code", None) 
     update_data.pop("agency_id", None) 
     update_data["updated_on"] = datetime.now()
@@ -723,9 +724,97 @@ async def delete_assignment(
 
     return {"message": "Assignment deleted"}
 
+# --- PROJECT-LEVEL ASSIGNMENTS (for non-event verticals) ---
+
+@router.post("/{project_id}/assignments")
+async def add_project_assignment(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    assignment: AssignmentModel = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """CREATE: Add a team member assignment directly to a project (no event)"""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$push": {"assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now()}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Send notification
+    await notify_associate_assignment(
+        db, background_tasks,
+        assignment.associate_id,
+        project.get("code", "Unknown"),
+        "Project Assignment",
+        datetime.now(),
+        current_user.agency_id
+    )
+
+    return {"message": "Assignment added successfully", "id": assignment.id}
+
+@router.patch("/{project_id}/assignments/{assignment_id}")
+async def update_project_assignment(
+    project_id: str,
+    assignment_id: str,
+    update_data: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """UPDATE: Update a project-level assignment"""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    set_fields = {f"assignments.$[asn].{k}": v for k, v in update_data.items()}
+    set_fields["updated_on"] = datetime.now()
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$set": set_fields},
+        array_filters=[{"asn.id": assignment_id}]
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {"message": "Assignment updated"}
+
+@router.delete("/{project_id}/assignments/{assignment_id}")
+async def delete_project_assignment(
+    project_id: str,
+    assignment_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """DELETE: Remove a project-level assignment"""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$pull": {"assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now()}}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Item not found or already deleted")
+
+    return {"message": "Assignment deleted"}
+
 @router.get("/assigned/{associate_id}")
 async def get_associate_schedule(associate_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """SEARCH: Find all projects where this associate is working"""
-    query = {"events.assignments.associate_id": associate_id}
+    query = {"$or": [
+        {"events.assignments.associate_id": associate_id},
+        {"assignments.associate_id": associate_id}
+    ]}
     projects = await db.projects.find(query).to_list(1000)
     return parse_mongo_data(projects)
