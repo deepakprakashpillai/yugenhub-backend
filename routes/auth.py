@@ -91,6 +91,7 @@ async def google_login(token_data: dict = Body(...)):
                 "agency_id": current_user.agency_id,
                 "picture": response_picture,
                 "finance_access": current_user.finance_access,
+                "can_manage_team": current_user.can_manage_team,
             }
         }
 
@@ -119,6 +120,7 @@ async def list_dev_users():
             "role": u.get("role", "member"),
             "picture": u.get("picture"),
             "finance_access": u.get("finance_access", False),
+            "can_manage_team": u.get("can_manage_team", False),
         }
         for u in users
     ]
@@ -152,6 +154,7 @@ async def dev_login(user_id: str):
             "agency_id": user.agency_id,
             "picture": user.picture,
             "finance_access": user.finance_access,
+            "can_manage_team": user.can_manage_team,
         },
     }
 

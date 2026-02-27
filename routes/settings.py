@@ -107,6 +107,7 @@ async def get_team(current_user: UserModel = Depends(get_current_user), db: Scop
         if is_owner:
             member["allowed_verticals"] = u.get("allowed_verticals", [])
             member["finance_access"] = u.get("finance_access", False)
+            member["can_manage_team"] = u.get("can_manage_team", False)
         result.append(member)
 
     return parse_mongo_data(result)
@@ -157,13 +158,18 @@ async def invite_user(
         raise HTTPException(status_code=400, detail="Invalid role. Must be 'member' or 'admin'")
 
     # Admin cannot invite with owner role
-    if current_user.role == "admin" and role == "owner":
-        raise HTTPException(status_code=403, detail="Admins cannot assign owner role")
+    if current_user.role == "admin":
+        if role == "owner":
+            raise HTTPException(status_code=403, detail="Admins cannot assign owner role")
+        # Check granular permission
+        if not getattr(current_user, "can_manage_team", False):
+            raise HTTPException(status_code=403, detail="You do not have permission to invite team members")
     
     # Only owner can set access controls
     if current_user.role != "owner":
         allowed_verticals = []
         finance_access = False
+        # can_manage_team defaults to False and isn't setable by non-owners via invite anyway
 
     # Check if user already exists in this agency
     existing = await db.users.find_one({
@@ -232,10 +238,12 @@ async def change_user_role(
 
     # Admin cannot promote to owner or demote other admins
     if current_user.role == "admin":
+        if not getattr(current_user, "can_manage_team", False):
+            raise HTTPException(status_code=403, detail="You do not have permission to manage roles")
         if new_role == "owner":
             raise HTTPException(status_code=403, detail="Admins cannot assign owner role")
-        if target.get("role") == "admin" and target["id"] != current_user.id:
-            raise HTTPException(status_code=403, detail="Admins cannot change other admin roles")
+        if target.get("role") == "admin":
+            raise HTTPException(status_code=403, detail="Admins cannot change admin roles (including their own)")
 
     await db.users.update_one(
         {"id": user_id},
@@ -280,8 +288,11 @@ async def update_user_details(
          raise HTTPException(status_code=403, detail="Admins cannot edit Owners")
     
     # 2. Admins can only edit Members (and themselves)
-    if current_user.role == "admin" and target.get("role") == "admin" and target["id"] != current_user.id:
-         raise HTTPException(status_code=403, detail="Admins cannot edit other Admins")
+    if current_user.role == "admin" and target["id"] != current_user.id:
+         if not getattr(current_user, "can_manage_team", False):
+             raise HTTPException(status_code=403, detail="You do not have permission to edit team members")
+         if target.get("role") == "admin":
+             raise HTTPException(status_code=403, detail="Admins cannot edit other Admins")
 
     # Email Validation/Uniqueness (if email is being changed)
     if "email" in filtered:
@@ -327,8 +338,11 @@ async def remove_user(
         raise HTTPException(status_code=403, detail="Cannot remove the owner")
 
     # Admin cannot remove other admins
-    if current_user.role == "admin" and target.get("role") == "admin":
-        raise HTTPException(status_code=403, detail="Admins cannot remove other admins")
+    if current_user.role == "admin":
+        if not getattr(current_user, "can_manage_team", False):
+            raise HTTPException(status_code=403, detail="You do not have permission to remove team members")
+        if target.get("role") == "admin":
+            raise HTTPException(status_code=403, detail="Admins cannot remove other admins")
 
     # Optionally deactivate linked associate
     if deactivate_associate and target.get("email"):
@@ -376,6 +390,12 @@ async def update_user_access(
         if not isinstance(fa, bool):
             raise HTTPException(status_code=400, detail="finance_access must be a boolean")
         update_fields["finance_access"] = fa
+
+    if "can_manage_team" in access_data:
+        cmt = access_data["can_manage_team"]
+        if not isinstance(cmt, bool):
+            raise HTTPException(status_code=400, detail="can_manage_team must be a boolean")
+        update_fields["can_manage_team"] = cmt
 
     if not update_fields:
         raise HTTPException(status_code=400, detail="No valid access fields to update")
@@ -732,6 +752,8 @@ async def get_account(current_user: UserModel = Depends(get_current_user)):
         "agency_id": current_user.agency_id,
         "picture": current_user.picture,
         "phone": current_user.phone,
+        "finance_access": current_user.finance_access,
+        "can_manage_team": current_user.can_manage_team,
     }
 
 

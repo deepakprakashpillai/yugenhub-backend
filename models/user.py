@@ -18,6 +18,7 @@ class UserModel(BaseModel):
     # RBAC: Per-user access control
     allowed_verticals: List[str] = Field(default_factory=list)  # Empty = all verticals
     finance_access: bool = False  # Explicit finance module access (owner/admin get it by default via role)
+    can_manage_team: bool = False # Granular permission for Admins to invite/remove/edit members
 
     model_config = ConfigDict(
         populate_by_name=True,

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Body, HTTPException, Depends, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 # REMOVED raw collection imports
 from models.task import TaskModel, TaskHistoryModel
 from models.notification import NotificationModel
@@ -24,12 +24,16 @@ def parse_mongo_data(data):
         if "_id" in data:
             data["_id"] = str(data["_id"])
         return {k: parse_mongo_data(v) for k, v in data.items()}
+    if isinstance(data, datetime):
+        if data.tzinfo is None:
+            data = data.replace(tzinfo=timezone.utc)
+        return data.isoformat()
     return data
 
 async def log_history(db: ScopedDatabase, task_id: str, user_id: str, changes: Dict[str, Any], comment: str = None):
     """Log changes to task history"""
     history_entries = []
-    timestamp = datetime.now()
+    timestamp = datetime.now(timezone.utc)
     
     # We need studio_id. Since we are in an agency context (ScopedDB), we can access it from db.agency_id
     # However, db.agency_id is the string ID.
@@ -97,7 +101,7 @@ async def list_tasks_grouped(
     if priority and priority != 'all':
         match_stage["priority"] = priority
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     thirty_days_ago = now - timedelta(days=30)
 
     # RBAC: Get user's allowed verticals for filtering project-linked tasks
@@ -489,7 +493,7 @@ async def update_task(
         return parse_mongo_data(existing_task)
         
     # Update DB
-    update_data["updated_at"] = datetime.now()
+    update_data["updated_at"] = datetime.now(timezone.utc)
     await db.tasks.update_one(
         {"id": task_id},
         {"$set": update_data}
