@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
 from models.user import UserModel
 # REMOVED raw collection imports
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, get_user_verticals
 from middleware.db_guard import ScopedDatabase
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from logging_config import get_logger
 
@@ -19,9 +19,11 @@ def parse_mongo_data(data):
             data["_id"] = str(data["_id"])
         if "project_id" in data:
             data["project_id"] = str(data["project_id"])
-        if isinstance(data, datetime):
-            return data.isoformat()
         return {k: parse_mongo_data(v) for k, v in data.items()}
+    if isinstance(data, datetime):
+        if data.tzinfo is None:
+            data = data.replace(tzinfo=timezone.utc)
+        return data.isoformat()
     return data
 
 
@@ -31,8 +33,13 @@ async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user
     # current_agency_id handled by db wrapper
     now = datetime.now()
     
-    # Base Stats (Global)
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
+    vertical_filter = {"vertical": {"$in": user_verticals}}
+    
+    # Base Stats (Scoped by verticals)
     active_projects = await db.projects.count_documents({
+        **vertical_filter,
         "status": {"$ne": "completed"}
     })
     
@@ -215,9 +222,12 @@ async def get_workload_stats(scope: str = "global", current_user: UserModel = De
 @router.get("/pipeline")
 async def get_project_pipeline(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Get active project distribution by Vertical"""
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     pipeline = [
         {"$match": {
-            "status": {"$ne": "completed"} # Exclude completed
+            "vertical": {"$in": user_verticals},
+            "status": {"$ne": "completed"}
         }},
         {"$group": {"_id": "$vertical", "count": {"$sum": 1}}}
     ]
@@ -232,7 +242,11 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
     now = datetime.now()
     next_2_weeks = now + timedelta(days=14) 
     
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
+    
     pipeline = [
+        {"$match": {"vertical": {"$in": user_verticals}}},
         {"$unwind": "$events"},
         {"$match": {
             "events.start_date": {"$gte": now, "$lte": next_2_weeks}
@@ -370,12 +384,16 @@ async def get_recent_activity(limit: int = 10, current_user: UserModel = Depends
         elif field == "assigned_to":
             action_text = "Updated assignment"
             
+        timestamp = log.get("timestamp")
+        if isinstance(timestamp, datetime) and timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            
         activity.append({
             "id": str(log["_id"]),
             "user_name": user_map.get(u_id, "System"),
             "task_title": task_map.get(t_id, t_id),
             "action": action_text,
-            "timestamp": log.get("timestamp")
+            "timestamp": timestamp
         })
         
     return activity

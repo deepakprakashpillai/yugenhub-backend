@@ -7,7 +7,7 @@ from database import notifications_collection
 from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, get_user_verticals
 from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from fastapi import Depends
@@ -136,6 +136,11 @@ async def create_project(
             status_code=400, 
             detail=f"Invalid vertical. Allowed: {allowed_verticals}"
         )
+    
+    # 3. RBAC: Check user has access to this vertical
+    user_verticals = await get_user_verticals(current_user, db)
+    if project.vertical not in user_verticals:
+        raise HTTPException(status_code=403, detail="You don't have access to this vertical")
 
     # 3. Automatic Code Generation
     # If code is missing or placeholder-y, generate a sequential one
@@ -221,9 +226,16 @@ async def list_projects(
     # Guardrail handles agency_id, so we just build the rest of the query
     query = {}
     
-    # 1. Filters
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     if vertical:
+        # If requesting a specific vertical, verify access
+        if vertical not in user_verticals:
+            return {"total": 0, "page": page, "limit": limit, "data": []}
         query["vertical"] = vertical
+    else:
+        # Scope to all allowed verticals
+        query["vertical"] = {"$in": user_verticals}
 
     # View Logic (Supercedes Status if View is specific)
     # Status filter is applied ON TOP of View if provided (e.g. View=Ongoing + Status=Enquiry)
@@ -385,6 +397,11 @@ async def get_project(id: str, current_user: UserModel = Depends(get_current_use
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
+    # RBAC: Check vertical access
+    user_verticals = await get_user_verticals(current_user, db)
+    if project.get("vertical") and project["vertical"] not in user_verticals:
+        raise HTTPException(status_code=404, detail="Project not found")  # 404 not 403 for seamless invisibility
+    
     return parse_mongo_data(project)
 
 @router.delete("/{id}")
@@ -395,6 +412,13 @@ async def delete_project(id: str, current_user: UserModel = Depends(get_current_
     
     # Cascade Delete Tasks (db.tasks uses studio_id automatically)
     await db.tasks.delete_many({"project_id": id})
+
+    # RBAC: Check vertical access before deleting
+    project = await db.projects.find_one({"_id": ObjectId(id)})
+    if project:
+        user_verticals = await get_user_verticals(current_user, db)
+        if project.get("vertical") and project["vertical"] not in user_verticals:
+            raise HTTPException(status_code=404, detail="Project not found")
 
     result = await db.projects.delete_one({"_id": ObjectId(id)})
     
@@ -428,8 +452,15 @@ async def delete_event(project_id: str, event_id: str, current_user: UserModel =
 async def get_project_stats(vertical: str = None, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """READ STATS: Get overview metrics for the vertical/dashboard"""
     base_query = {}
+    
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     if vertical:
+        if vertical not in user_verticals:
+            return {"total": 0, "active": 0, "ongoing": 0, "this_month": 0}
         base_query["vertical"] = vertical
+    else:
+        base_query["vertical"] = {"$in": user_verticals}
 
     # 1. Total Projects
     total = await db.projects.count_documents(base_query)
@@ -550,6 +581,7 @@ async def update_project(
     # Prevent updating immutable fields or fields handled by specific logic
     update_data.pop("_id", None)
     update_data.pop("events", None) 
+    update_data.pop("assignments", None)  # Handled by dedicated endpoints
     update_data.pop("code", None) 
     update_data.pop("agency_id", None) 
     update_data["updated_on"] = datetime.now()
@@ -692,9 +724,97 @@ async def delete_assignment(
 
     return {"message": "Assignment deleted"}
 
+# --- PROJECT-LEVEL ASSIGNMENTS (for non-event verticals) ---
+
+@router.post("/{project_id}/assignments")
+async def add_project_assignment(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    assignment: AssignmentModel = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """CREATE: Add a team member assignment directly to a project (no event)"""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$push": {"assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now()}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Send notification
+    await notify_associate_assignment(
+        db, background_tasks,
+        assignment.associate_id,
+        project.get("code", "Unknown"),
+        "Project Assignment",
+        datetime.now(),
+        current_user.agency_id
+    )
+
+    return {"message": "Assignment added successfully", "id": assignment.id}
+
+@router.patch("/{project_id}/assignments/{assignment_id}")
+async def update_project_assignment(
+    project_id: str,
+    assignment_id: str,
+    update_data: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """UPDATE: Update a project-level assignment"""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    set_fields = {f"assignments.$[asn].{k}": v for k, v in update_data.items()}
+    set_fields["updated_on"] = datetime.now()
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$set": set_fields},
+        array_filters=[{"asn.id": assignment_id}]
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {"message": "Assignment updated"}
+
+@router.delete("/{project_id}/assignments/{assignment_id}")
+async def delete_project_assignment(
+    project_id: str,
+    assignment_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """DELETE: Remove a project-level assignment"""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$pull": {"assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now()}}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Item not found or already deleted")
+
+    return {"message": "Assignment deleted"}
+
 @router.get("/assigned/{associate_id}")
 async def get_associate_schedule(associate_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """SEARCH: Find all projects where this associate is working"""
-    query = {"events.assignments.associate_id": associate_id}
+    query = {"$or": [
+        {"events.assignments.associate_id": associate_id},
+        {"assignments.associate_id": associate_id}
+    ]}
     projects = await db.projects.find(query).to_list(1000)
     return parse_mongo_data(projects)

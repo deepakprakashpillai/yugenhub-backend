@@ -38,6 +38,7 @@ class ProjectModel(BaseModel):
     status: str = "enquiry"
     lead_source: str = "Other"
     events: List[EventModel] = Field(default_factory=list)
+    assignments: List[AssignmentModel] = Field(default_factory=list)  # Project-level team (for non-event verticals)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_on: datetime = Field(default_factory=datetime.now)
     updated_on: datetime = Field(default_factory=datetime.now)

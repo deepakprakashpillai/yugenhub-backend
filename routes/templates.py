@@ -6,7 +6,7 @@ from typing import List, Optional
 from database import projects_collection # Fallback if needed, but we use db
 from models.template import ProjectTemplateModel
 from models.user import UserModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, require_role, get_user_verticals
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 
@@ -23,7 +23,7 @@ def parse_mongo_data(data):
 @router.post("", status_code=201)
 async def create_template(
     template_data: dict = Body(...),
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
     """CREATE: Create a new template or save existing project as template"""
@@ -110,11 +110,18 @@ async def list_templates(
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
 ):
-    """READ: List templates, optionally filtered by vertical"""
+    """READ: List templates, filtered by user's vertical access"""
     query = {}
+    
+    # RBAC: Scope to user's allowed verticals
+    user_verticals = await get_user_verticals(current_user, db)
     if vertical:
+        if vertical not in user_verticals:
+            return []
         query["vertical"] = vertical
-        
+    else:
+        query["vertical"] = {"$in": user_verticals}
+    
     cursor = db.templates.find(query).sort("created_at", -1)
     templates = await cursor.to_list(length=100)
     
@@ -124,7 +131,7 @@ async def list_templates(
 async def update_template(
     template_id: str,
     update_data: dict = Body(...),
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
     """UPDATE: Modify an existing template"""
@@ -148,7 +155,7 @@ async def update_template(
 @router.delete("/{template_id}")
 async def delete_template(
     template_id: str,
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
     """DELETE: Remove a template"""

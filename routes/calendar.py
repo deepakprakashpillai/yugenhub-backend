@@ -3,7 +3,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 # REMOVED raw collection imports
 from models.user import UserModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, get_user_verticals
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 
@@ -50,9 +50,13 @@ async def get_calendar_events(
 
     # 1. FETCH PROJECT EVENTS (Shoots, Meetings, etc.)
     if type != "task":  # Skip if only tasks requested
+        # RBAC: Only show events from verticals user has access to
+        user_verticals = await get_user_verticals(current_user, db)
+        
         # Find projects that have at least one event in the range
         projects_cursor = db.projects.find({
-            "events": {"$ne": []} 
+            "events": {"$ne": []},
+            "vertical": {"$in": user_verticals}
         })
         
         async for project in projects_cursor:

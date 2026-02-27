@@ -6,12 +6,7 @@ class Roles:
     MEMBER = "member"
     VIEWER = "viewer"
 
-class Verticals:
-    KNOTS = "knots"
-    PLUTO = "pluto"
-    ROBO = "robo"
-    RAYDIUM = "raydium"
-    GENERAL = "general"
+
 
 class TransactionTypes:
     INCOME = "income"

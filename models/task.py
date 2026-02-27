@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Literal, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 class TaskHistoryModel(BaseModel):
@@ -12,7 +12,7 @@ class TaskHistoryModel(BaseModel):
     new_value: Optional[Any] = None
     comment: Optional[str] = None
     studio_id: str # Added for direct agency filtering
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -43,8 +43,8 @@ class TaskModel(BaseModel):
     
     # Timing
     due_date: Optional[datetime] = None
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
         populate_by_name=True,

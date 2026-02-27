@@ -5,7 +5,7 @@ from datetime import datetime
 from models.finance import AccountModel, TransactionModel, ClientLedgerModel, InvoiceModel, AssociatePayoutModel
 from bson import ObjectId
 
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, require_finance_access
 from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from constants import Roles
@@ -13,14 +13,7 @@ from logging_config import get_logger
 
 logger = get_logger("finance")
 
-async def ensure_finance_access(current_user: UserModel = Depends(get_current_user)):
-    if current_user.role not in [Roles.ADMIN, Roles.OWNER]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access Denied: Finance data is restricted to Admins and Owners."
-        )
-
-router = APIRouter(prefix="/api/finance", tags=["Finance"], dependencies=[Depends(ensure_finance_access)])
+router = APIRouter(prefix="/api/finance", tags=["Finance"], dependencies=[Depends(require_finance_access())])
 
 # -----------------------------------------------------------------------------
 # Helper Functions

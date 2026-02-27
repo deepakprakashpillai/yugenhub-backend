@@ -103,34 +103,67 @@ DEFAULT_AGENCY_CONFIG = {
             "id": "knots",
             "label": "Knots",
             "description": "Weddings",
-            "type": "wedding",
-            "fields": []
+            "has_events": True,
+            "include_in_finance_summary": True,
+            "title_template": "{groom_name} & {bride_name}",
+            "card_fields": ["side", "religion"],
+            "table_fields": ["side", "religion", "wedding_date"],
+            "fields": [
+                {"name": "side", "label": "Side", "type": "select", "options": ["Groom", "Bride", "Both"]},
+                {"name": "religion", "label": "Religion", "type": "select", "options": ["Hindu", "Christian", "Muslim", "Other"]},
+                {"name": "groom_name", "label": "Groom Name", "type": "text", "options": []},
+                {"name": "bride_name", "label": "Bride Name", "type": "text", "options": []},
+                {"name": "groom_number", "label": "Groom Contact", "type": "tel", "options": []},
+                {"name": "bride_number", "label": "Bride Contact", "type": "tel", "options": []},
+                {"name": "wedding_date", "label": "Wedding Date", "type": "date", "options": []},
+            ],
+            "event_fields": []
         },
         {
             "id": "pluto",
             "label": "Pluto",
             "description": "Kids",
-            "type": "children",
-            "fields": []
+            "has_events": True,
+            "include_in_finance_summary": True,
+            "title_template": "{child_name}'s {occasion_type}",
+            "card_fields": ["occasion_type"],
+            "table_fields": ["child_name", "occasion_type"],
+            "fields": [
+                {"name": "child_name", "label": "Child Name", "type": "text", "options": []},
+                {"name": "child_age", "label": "Age", "type": "number", "options": []},
+                {"name": "occasion_type", "label": "Occasion", "type": "select", "options": ["Birthday", "Baptism", "Newborn", "Other"]},
+            ],
+            "event_fields": []
         },
         {
             "id": "festia",
             "label": "Festia",
             "description": "Events",
-            "type": "general",
+            "has_events": True,
+            "include_in_finance_summary": True,
+            "title_template": "{event_name}",
+            "card_fields": ["event_scale"],
+            "table_fields": ["event_scale", "company_name"],
             "fields": [
                 {"name": "event_scale", "label": "Scale", "type": "select", "options": ["Private", "Corporate", "Mass"]},
                 {"name": "company_name", "label": "Company Name", "type": "text", "options": []},
-            ]
+                {"name": "event_name", "label": "Event Name", "type": "text", "options": []},
+            ],
+            "event_fields": []
         },
         {
             "id": "thryv",
             "label": "Thryv",
             "description": "Marketing",
-            "type": "general",
+            "has_events": False,
+            "include_in_finance_summary": True,
+            "title_template": "{service_type}",
+            "card_fields": ["service_type"],
+            "table_fields": ["service_type"],
             "fields": [
                 {"name": "service_type", "label": "Service", "type": "text", "options": []},
-            ]
+            ],
+            "event_fields": []
         },
     ],
 }

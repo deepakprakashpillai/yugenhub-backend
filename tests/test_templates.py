@@ -8,7 +8,7 @@ async def test_create_and_list_template(async_client: AsyncClient, auth_headers:
     """Create a manual template and verify it appears in the list."""
     payload = {
         "name": "Standard Wedding",
-        "vertical": "wedding",
+        "vertical": "knots",
         "description": "Default wedding template",
         "events": [],
         "metadata": {},
@@ -39,7 +39,7 @@ async def test_update_template(async_client: AsyncClient, auth_headers: dict):
     # Create
     resp = await async_client.post(
         "/api/templates",
-        json={"name": "Updatable", "vertical": "wedding"},
+        json={"name": "Updatable", "vertical": "knots"},
         headers=auth_headers,
     )
     template_id = resp.json()["_id"]
@@ -57,7 +57,7 @@ async def test_delete_template(async_client: AsyncClient, auth_headers: dict):
     # Create
     resp = await async_client.post(
         "/api/templates",
-        json={"name": "Delete Me Template", "vertical": "wedding"},
+        json={"name": "Delete Me Template", "vertical": "knots"},
         headers=auth_headers,
     )
     template_id = resp.json()["_id"]
