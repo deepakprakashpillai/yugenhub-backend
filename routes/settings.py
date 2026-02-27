@@ -706,6 +706,7 @@ async def get_notification_prefs(current_user: UserModel = Depends(get_current_u
         "project_completed": prefs.get("project_completed", True),
         "mentions": prefs.get("mentions", True),
         "email_notifications": prefs.get("email_notifications", False),
+        "push_notifications": prefs.get("push_notifications", True),
     })
 
 
@@ -720,7 +721,7 @@ async def update_notification_prefs(
 
     allowed_fields = {
         "task_assigned", "task_updated", "project_created",
-        "project_completed", "mentions", "email_notifications"
+        "project_completed", "mentions", "email_notifications", "push_notifications"
     }
     filtered = {k: v for k, v in updates.items() if k in allowed_fields and isinstance(v, bool)}
 

@@ -14,3 +14,6 @@ class NotificationPrefsModel(BaseModel):
 
     # Email notification toggle
     email_notifications: bool = False
+
+    # Push notifications toggle
+    push_notifications: bool = True
