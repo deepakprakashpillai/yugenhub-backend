@@ -10,6 +10,7 @@ from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
 from config import config
 from utils.email import send_task_assignment_email
+from utils.push import send_push_notification
 import uuid
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
@@ -280,6 +281,16 @@ async def create_task(
                 )
         except Exception as e:
             logger.error(f"Failed to queue task assignment email: {e}")
+            
+        # 5. Send Push Notification
+        background_tasks.add_task(
+            send_push_notification,
+            db=db,
+            user_id=task.assigned_to,
+            title="New Assignment",
+            message=message,
+            url=f"/tasks?taskId={task.id}"
+        )
             
         logger.info(f"Task assignment notification sent", extra={"data": {"task_id": task.id, "assignee": task.assigned_to}})
     
@@ -568,6 +579,16 @@ async def update_task(
             except Exception as e:
                 logger.error(f"Failed to queue task reassignment email: {e}")
                 
+            # 5. Send Push Notification
+            background_tasks.add_task(
+                send_push_notification,
+                db=db,
+                user_id=new_assignee,
+                title="New Task Assigned",
+                message=message,
+                url=f"/tasks?taskId={task_id}"
+            )
+            
             logger.info(f"Task reassignment notification sent", extra={"data": {"task_id": task_id, "new_assignee": new_assignee}})
     
     logger.info(f"Task updated", extra={"data": {"task_id": task_id, "fields_changed": list(changes.keys())}})

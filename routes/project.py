@@ -14,6 +14,7 @@ from fastapi import Depends
 from logging_config import get_logger
 from config import config
 from utils.email import send_event_assignment_email
+from utils.push import send_push_notification
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
@@ -77,6 +78,16 @@ async def notify_associate_assignment(db: ScopedDatabase, background_tasks: Back
         )
     except Exception as e:
         logger.error(f"Failed to queue event assignment email: {e}")
+
+    # Send Push Notification
+    background_tasks.add_task(
+        send_push_notification,
+        db=db,
+        user_id=user.get("id"),
+        title="Assigned to Event",
+        message=f"You have been assigned to {event_type} on {formatted_date} for project {project_code}",
+        url=f"/projects"
+    )
 
     logger.info(f"Notification sent to associate for event assignment", extra={"data": {"associate": associate.get('name'), "project": project_code, "event": event_type}})
 
