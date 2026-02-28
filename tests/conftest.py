@@ -30,11 +30,8 @@ sync_db = sync_client[config.DB_NAME]
 
 
 
-@pytest.fixture(scope="session", autouse=True)
-def test_db():
-    # Ensure clean state from any previously crashed runs
-    sync_client.drop_database(config.DB_NAME)
-    # Seed default config for project/settings/workflow validation
+# Seed function (re-used per test)
+def seed_default_config():
     sync_db.agency_configs.update_one(
         {"agency_id": "test_agency"},
         {"$set": {
@@ -63,9 +60,22 @@ def test_db():
         }},
         upsert=True
     )
+
+@pytest.fixture(scope="session", autouse=True)
+def test_db_session():
+    # Ensure clean state from any previously crashed runs on startup
+    sync_client.drop_database(config.DB_NAME)
     yield sync_db
     # Teardown: drop the database after tests are done
     sync_client.drop_database(config.DB_NAME)
+
+@pytest.fixture(scope="function", autouse=True)
+def clean_db(test_db_session):
+    """Drop all collections before each test and re-seed defaults to ensure test isolation."""
+    for collection in sync_db.list_collection_names():
+        sync_db.drop_collection(collection)
+    seed_default_config()
+    yield
 
 @pytest.fixture(scope="function")
 async def async_client():
