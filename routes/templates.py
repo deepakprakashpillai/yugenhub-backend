@@ -17,7 +17,13 @@ def parse_mongo_data(data):
     if isinstance(data, list):
         return [parse_mongo_data(item) for item in data]
     if isinstance(data, dict):
-        return {k: (str(v) if isinstance(v, ObjectId) else parse_mongo_data(v)) for k, v in data.items()}
+        result = {}
+        for k, v in data.items():
+            if k == "_id":
+                result["id"] = str(v)
+            else:
+                result[k] = str(v) if isinstance(v, ObjectId) else parse_mongo_data(v)
+        return result
     return data
 
 @router.post("", status_code=201)
@@ -101,7 +107,7 @@ async def create_template(
     
     logger.info(f"Template created", extra={"data": {"name": new_template.name, "vertical": new_template.vertical}})
     
-    data["_id"] = str(result.inserted_id)
+    data["id"] = str(result.inserted_id)
     return parse_mongo_data(data)
 
 @router.get("")
