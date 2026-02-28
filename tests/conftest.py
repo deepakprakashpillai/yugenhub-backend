@@ -5,13 +5,16 @@ import asyncio
 from datetime import timedelta
 
 # Set up test environment variables before anything else
+worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+db_name = f"yugen_hub_test_{worker_id}"
+
 os.environ["ENV"] = "testing"
-os.environ["DB_NAME"] = "yugen_hub_test"
+os.environ["DB_NAME"] = db_name
 os.environ["SECRET_KEY"] = "test_secret_key_12345"
 
 from config import config
 config.ENV = "testing"
-config.DB_NAME = "yugen_hub_test"
+config.DB_NAME = db_name
 
 from main import app
 from database import client, users_collection
@@ -23,14 +26,14 @@ from pymongo import MongoClient
 
 # Setup sync client for testing fixtures
 sync_client = MongoClient(config.MONGO_URI if hasattr(config, "MONGO_URI") and config.MONGO_URI else "mongodb://localhost:27017/")
-sync_db = sync_client["yugen_hub_test"]
+sync_db = sync_client[config.DB_NAME]
 
 
 
 @pytest.fixture(scope="session", autouse=True)
 def test_db():
     # Ensure clean state from any previously crashed runs
-    sync_client.drop_database("yugen_hub_test")
+    sync_client.drop_database(config.DB_NAME)
     # Seed default config for project/settings/workflow validation
     sync_db.agency_configs.update_one(
         {"agency_id": "test_agency"},
@@ -62,7 +65,7 @@ def test_db():
     )
     yield sync_db
     # Teardown: drop the database after tests are done
-    sync_client.drop_database("yugen_hub_test")
+    sync_client.drop_database(config.DB_NAME)
 
 @pytest.fixture(scope="function")
 async def async_client():

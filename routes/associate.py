@@ -248,5 +248,6 @@ async def delete_associate(associate_id: str, current_user: UserModel = Depends(
         raise HTTPException(status_code=404, detail="Associate not found")
     
     logger.info(f"Associate deleted", extra={"data": {"associate_id": associate_id}})
+    return {"message": "Associate deleted successfully"}
     
 
