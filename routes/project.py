@@ -30,19 +30,16 @@ async def notify_associate_assignment(db: ScopedDatabase, background_tasks: Back
     
     # Find associate and their email
     associate = await db.associates.find_one({"_id": ObjectId(associate_id)})
-    if not associate or not associate.get("email_id"):
+    if not associate:
+        return
+        
+    associate_email = associate.get("email_id") or associate.get("email")
+    if not associate_email:
         return  # No email, can't notify
     
     # Find user with this email -- USERS collection is special, might need checking
-    # Users collection is generally global but filtered? users_collection in db_guard might filter by agency.
-    # But for finding a user by email, we might need cross-agency?
-    # Actually, associates are in the agency, so the user SHOULD be in the agency.
     
-    # BUT wait, the `db` wrapper enforces agency_id on ALL find queries.
-    # If the user is not in the agency (e.g. pending invite accepting?), we might fail.
-    # However, standard flow is: User is added to agency users.
-    
-    user = await db.users.find_one({"email": associate.get("email_id")})
+    user = await db.users.find_one({"email": associate_email})
     if not user:
         return  # No user account, can't notify
     
@@ -621,6 +618,63 @@ async def update_event(
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
+    # If deliverables are being updated, we need to sync them to Tasks
+    # Find existing tasks for this event
+    if "deliverables" in update_data:
+        existing_tasks = await db.tasks.find({"project_id": project_id, "event_id": event_id, "category": "deliverable"}).to_list(length=None)
+        existing_task_deliverable_ids = [t.get("metadata", {}).get("deliverable_id") for t in existing_tasks]
+        all_new_tasks = []
+        project_code = "UNKNOWN"
+        project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
+        event_type = "Event"
+        if project_doc:
+            project_code = project_doc.get("code", "PROJECT")
+            for evt in project_doc.get("events", []):
+                if evt.get("id") == event_id:
+                    event_type = evt.get("type", "Event")
+                    break
+
+        for deliverable in update_data["deliverables"]:
+            # If this is a new deliverable (doesn't exist in tasks or is newly generated)
+            deliv_id = deliverable.get("id")
+            
+            # Very basic sync: just create tasks for deliverables that don't have one yet.
+            # In a full sync, we'd also update/delete tasks, but since deliverables
+            # are usually managed via TaskModal now, this is mainly for the "Edit Event" modal fallback.
+            if deliv_id not in existing_task_deliverable_ids:
+                task = TaskModel(
+                    title=f"{deliverable.get('type', 'Deliverable')} ({event_type})",
+                    description=f"Deliverable for {event_type}",
+                    project_id=project_id,
+                    event_id=event_id,
+                    status=deliverable.get('status', 'Pending').lower(),
+                    priority="medium",
+                    due_date=deliverable.get('due_date'),
+                    assigned_to=deliverable.get('incharge_id'),
+                    studio_id=current_user.agency_id,
+                    created_by=current_user.id,
+                    type="project",
+                    category="deliverable",
+                    quantity=deliverable.get("quantity", 1),
+                    metadata={"deliverable_id": deliv_id}
+                )
+                all_new_tasks.append(task.model_dump())
+            else:
+                await db.tasks.update_one(
+                    {"project_id": project_id, "event_id": event_id, "category": "deliverable", "metadata.deliverable_id": deliv_id},
+                    {"$set": {
+                        "status": deliverable.get('status', 'Pending').lower(),
+                        "due_date": deliverable.get('due_date'),
+                        "quantity": deliverable.get("quantity", 1),
+                        "title": f"{deliverable.get('type', 'Deliverable')} ({event_type})",
+                        "updated_on": datetime.now()
+                    }}
+                )
+        
+        if all_new_tasks: # Changed from new_tasks to all_new_tasks
+            await db.tasks.insert_many(all_new_tasks) # Changed from new_tasks to all_new_tasks
+            logger.info(f"Created synced tasks from deliverables", extra={"data": {"count": len(all_new_tasks), "project_id": project_id}})
+
     # Prefix keys with "events.$." to update the matched array element
     set_fields = {f"events.$.{k}": v for k, v in update_data.items()}
     set_fields["updated_on"] = datetime.now()
@@ -662,6 +716,10 @@ async def add_assignment(
         if evt.get("id") == event_id:
             event_type = evt.get("type", "Event")
             event_date = evt.get("start_date")
+            # Check for duplicate assignment
+            existing_assignments = [str(a.get("associate_id")) for a in evt.get("assignments", [])]
+            if str(assignment.associate_id) in existing_assignments:
+                raise HTTPException(status_code=400, detail="Associate is already assigned to this event")
             break
 
     result = await db.projects.update_one(
