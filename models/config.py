@@ -42,6 +42,10 @@ class FinanceCategory(BaseModel):
     subcategories: List[SubCategory] = []
 
 
+class AutomationsConfig(BaseModel):
+    calendar_enabled: bool = False
+    calendar_notifications_enabled: bool = False
+
 class AgencyConfigModel(BaseModel):
     agency_id: str = "default"
 
@@ -61,6 +65,9 @@ class AgencyConfigModel(BaseModel):
 
     # Finance config
     finance_categories: List[FinanceCategory] = []
+
+    # System Automations
+    automations: AutomationsConfig = Field(default_factory=AutomationsConfig)
 
     # Verticals
     verticals: List[Vertical] = []
