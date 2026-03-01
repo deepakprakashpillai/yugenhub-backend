@@ -804,3 +804,34 @@ async def reset_config(
         extra={"data": {"agency_id": current_user.agency_id, "reset_by": current_user.id}}
     )
     return {"message": "Configuration reset to defaults"}
+
+# ─── AUTOMATIONS ─────────────────────────────────────────────────────────────
+
+@router.get("/automations")
+async def get_automations(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
+    """Get automations configuration."""
+    config = await get_or_create_config(db)
+    return parse_mongo_data({
+        "automations": config.get("automations", {"calendar_enabled": False, "calendar_notifications_enabled": False})
+    })
+
+@router.patch("/automations")
+async def update_automations(
+    updates: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update automations configuration."""
+    automations = updates.get("automations")
+    if automations is None:
+        raise HTTPException(status_code=400, detail="'automations' field required")
+
+    await db.agency_configs.update_one(
+        {},
+        {"$set": {"automations": automations}}
+    )
+    logger.info(
+        f"Automations config updated",
+        extra={"data": {"agency_id": current_user.agency_id, "fields": list(automations.keys())}}
+    )
+    return {"message": "Automations configuration updated"}

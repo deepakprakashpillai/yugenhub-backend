@@ -15,9 +15,49 @@ from logging_config import get_logger
 from config import config
 from utils.email import send_event_assignment_email
 from utils.push import send_push_notification
+from automations.calendar import sync_event_to_calendar
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
+
+async def _resolve_project_name(project: dict, db: ScopedDatabase) -> str:
+    """Replicates the frontend's regex pattern replacing for vertical metadata templates."""
+    metadata = project.get("metadata", {})
+    fallback_name = metadata.get("project_type", project.get("code", "Project"))
+    
+    vertical_id = project.get("vertical")
+    if not vertical_id:
+        return fallback_name
+        
+    config = await db.agency_configs.find_one({})
+    if not config:
+        return fallback_name
+        
+    verticals = config.get("verticals", [])
+    v_id = vertical_id.lower()
+    vertical_config = next((v for v in verticals if v.get("id", "").lower() == v_id), None)
+    
+    if not vertical_config or not vertical_config.get("title_template"):
+        return fallback_name
+        
+    template = vertical_config["title_template"]
+    
+    # Create a case-insensitive lookup dict
+    lower_metadata = {k.lower(): v for k, v in metadata.items()}
+    
+    def replacer(match):
+        key = match.group(1).lower()
+        val = lower_metadata.get(key, "")
+        if val and isinstance(val, str):
+            val = val.strip()
+            return val.split(" ")[0] if val else ""
+        return str(val) if val else ""
+        
+    resolved = re.sub(r"\{(\w+)\}", replacer, template)
+    resolved = resolved.strip()
+    resolved = re.sub(r"^[&\s]+|[&\s]+$", "", resolved)
+    
+    return resolved if resolved and resolved != "&" else fallback_name
 
 # --- HELPER: Notify Associate on Assignment ---
 async def notify_associate_assignment(db: ScopedDatabase, background_tasks: BackgroundTasks, associate_id: str, project_code: str, event_type: str, event_date: datetime, agency_id: str):
@@ -178,6 +218,26 @@ async def create_project(
     if project.events:
         all_new_tasks = []
         for event in project.events:
+            # Sync to external calendar (Synchronous to provide immediate feedback to frontend)
+            project_name = await _resolve_project_name(project_data, db)
+            sync_result = await sync_event_to_calendar(
+                db=db,
+                project_id=project_id,
+                event_id=event.id,
+                action="create",
+                project_vertical=project_data.get("vertical"),
+                title=f"{event.type} - {project_name}",
+                start_time=event.start_date,
+                end_time=event.end_date
+            )
+            
+            # Inject calendar_event_id into the local dict so it is sent down in the API response
+            if sync_result and isinstance(sync_result, str):
+                for e_dict in project_data.get("events", []):
+                    if e_dict.get("id") == event.id:
+                        e_dict["calendar_event_id"] = sync_result
+                        break
+            
             # a. Create Tasks for Deliverables
             if event.deliverables:
                 for deliverable in event.deliverables:
@@ -505,7 +565,7 @@ async def get_project(id: str, current_user: UserModel = Depends(get_current_use
     return parse_mongo_data(project)
 
 @router.delete("/{id}")
-async def delete_project(id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
+async def delete_project(id: str, background_tasks: BackgroundTasks, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """DELETE: Remove an entire project"""
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="Invalid ID")
@@ -520,6 +580,18 @@ async def delete_project(id: str, current_user: UserModel = Depends(get_current_
         if project.get("vertical") and project["vertical"] not in user_verticals:
             raise HTTPException(status_code=404, detail="Project not found")
 
+        # Send calendar delete actions for any tracked events
+        for event in project.get("events", []):
+            if event.get("calendar_event_id"):
+                await sync_event_to_calendar(
+                    db=db,
+                    project_id=id,
+                    event_id=event.get("id"),
+                    action="delete",
+                    project_vertical=project.get("vertical"),
+                    calendar_event_id=event.get("calendar_event_id")
+                )
+
     result = await db.projects.delete_one({"_id": ObjectId(id)})
     
     if result.deleted_count == 0:
@@ -530,13 +602,29 @@ async def delete_project(id: str, current_user: UserModel = Depends(get_current_
     return {"message": "Project and associated tasks deleted successfully"}
 
 @router.delete("/{project_id}/events/{event_id}")
-async def delete_event(project_id: str, event_id: str, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
+async def delete_event(project_id: str, event_id: str, background_tasks: BackgroundTasks, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """DELETE: Remove an event from a project"""
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
     
     # Cascade Delete Tasks linked to this Event
     await db.tasks.delete_many({"event_id": event_id, "project_id": project_id})
+
+    # Get the event first to check for calendar_event_id
+    project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
+    calendar_synced = False
+    if project_doc:
+        for evt in project_doc.get("events", []):
+            if evt.get("id") == event_id and evt.get("calendar_event_id"):
+                calendar_synced = await sync_event_to_calendar(
+                    db=db,
+                    project_id=project_id,
+                    event_id=event_id,
+                    action="delete",
+                    project_vertical=project_doc.get("vertical"),
+                    calendar_event_id=evt.get("calendar_event_id")
+                )
+                break
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
@@ -546,7 +634,7 @@ async def delete_event(project_id: str, event_id: str, current_user: UserModel =
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Project or Event not found")
     
-    return {"message": "Event and associated tasks deleted successfully"}
+    return {"message": "Event and associated tasks deleted successfully", "calendar_synced": bool(calendar_synced)}
 
 @router.get("/stats/overview")
 async def get_project_stats(vertical: str = None, current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
@@ -616,6 +704,7 @@ async def get_project_stats(vertical: str = None, current_user: UserModel = Depe
 @router.post("/{project_id}/events")
 async def add_event_to_project(
     project_id: str, 
+    background_tasks: BackgroundTasks,
     event: EventModel = Body(...), 
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -634,14 +723,40 @@ async def add_event_to_project(
 
     # --- SYNC: Create Tasks for Deliverables ---
     # Deliverables should be treated as Tasks for progress tracking
+    project_code = "UNKNOWN"
+    
+    # We need project details for the task
+    project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if project_doc:
+        project_code = project_doc.get("code", "PROJECT")
+
+    # Sync to external calendar (Synchronous)
+    calendar_synced = False
+    if project_doc:
+        project_name = await _resolve_project_name(project_doc, db)
+        sync_result = await sync_event_to_calendar(
+            db=db,
+            project_id=project_id,
+            event_id=event.id,
+            action="create",
+            project_vertical=project_doc.get("vertical"),
+            title=f"{event.type} - {project_name}",
+            start_time=event.start_date,
+            end_time=event.end_date
+        )
+        
+        if sync_result and isinstance(sync_result, str):
+            calendar_synced = True
+            # Update the event with the returned calendar_event_id
+            await db.projects.update_one(
+                {"_id": ObjectId(project_id), "events.id": event.id},
+                {"$set": {"events.$.calendar_event_id": sync_result}}
+            )
+        elif sync_result:
+             calendar_synced = True
+
+    new_tasks = []
     if event.deliverables:
-        new_tasks = []
-        project_code = "UNKNOWN"
-        
-        # We need project details for the task
-        project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
-        project_code = project_doc.get("code", "PROJECT") if project_doc else "PROJECT"
-        
         for deliverable in event.deliverables:
             # Create a Task for this deliverable
             task = TaskModel(
@@ -665,11 +780,12 @@ async def add_event_to_project(
             await db.tasks.insert_many(new_tasks)
             logger.info(f"Created tasks from deliverables", extra={"data": {"count": len(new_tasks), "event_type": event.type, "project_id": project_id}})
 
-    return {"message": "Event added successfully"}
+    return {"message": "Event added successfully", "calendar_synced": calendar_synced}
 
 @router.patch("/{project_id}")
 async def update_project(
     project_id: str, 
+    background_tasks: BackgroundTasks,
     update_data: dict = Body(...), 
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -677,6 +793,12 @@ async def update_project(
     """UPDATE: Generic update for project fields"""
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not old_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    old_name = await _resolve_project_name(old_project, db)
 
     # Prevent updating immutable fields or fields handled by specific logic
     update_data.pop("_id", None)
@@ -694,6 +816,26 @@ async def update_project(
     if result.matched_count == 0:
         logger.warning(f"Update project failed: not found", extra={"data": {"project_id": project_id}})
         raise HTTPException(status_code=404, detail="Project not found")
+        
+    # Check if project name changed and sync calendars
+    updated_project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if updated_project:
+        new_name = await _resolve_project_name(updated_project, db)
+        if old_name != new_name:
+            for evt in updated_project.get("events", []):
+                if evt.get("calendar_event_id"):
+                    background_tasks.add_task(
+                        sync_event_to_calendar,
+                        db=db,
+                        project_id=project_id,
+                        event_id=evt.get("id"),
+                        action="update",
+                        project_vertical=updated_project.get("vertical"),
+                        title=f"{evt.get('type', 'Event')} - {new_name}",
+                        start_time=evt.get("start_date"),
+                        end_time=evt.get("end_date"),
+                        calendar_event_id=evt.get("calendar_event_id")
+                    )
 
     logger.info(f"Project updated", extra={"data": {"project_id": project_id, "fields": list(update_data.keys())}})
     return {"message": "Project updated successfully"}
@@ -702,6 +844,7 @@ async def update_project(
 async def update_event(
     project_id: str, 
     event_id: str, 
+    background_tasks: BackgroundTasks,
     update_data: dict = Body(...), 
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -709,6 +852,26 @@ async def update_event(
     """UPDATE: Update a specific event within a project"""
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
+        
+    old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not old_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    old_event = next((e for e in old_project.get("events", []) if e.get("id") == event_id), None)
+    if not old_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+        
+    needs_calendar_sync = False
+    if not old_event.get("calendar_event_id"):
+        needs_calendar_sync = True
+    else:
+        for field in ["type", "start_date", "end_date"]:
+            if field in update_data:
+                old_val = str(old_event.get(field, ""))
+                new_val = str(update_data.get(field, ""))
+                if old_val != new_val:
+                    needs_calendar_sync = True
+                    break
 
     # If deliverables are being updated, we need to sync them to Tasks
     # Find existing tasks for this event
@@ -716,15 +879,8 @@ async def update_event(
         existing_tasks = await db.tasks.find({"project_id": project_id, "event_id": event_id, "category": "deliverable"}).to_list(length=None)
         existing_task_deliverable_ids = [t.get("metadata", {}).get("deliverable_id") for t in existing_tasks]
         all_new_tasks = []
-        project_code = "UNKNOWN"
-        project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
-        event_type = "Event"
-        if project_doc:
-            project_code = project_doc.get("code", "PROJECT")
-            for evt in project_doc.get("events", []):
-                if evt.get("id") == event_id:
-                    event_type = evt.get("type", "Event")
-                    break
+        project_code = old_project.get("code", "PROJECT")
+        event_type = old_event.get("type", "Event")
 
         for deliverable in update_data["deliverables"]:
             # If this is a new deliverable (doesn't exist in tasks or is newly generated)
@@ -779,7 +935,27 @@ async def update_event(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project or Event not found")
 
-    return {"message": "Event updated successfully"}
+    # Sync to external calendar
+    if needs_calendar_sync:
+        updated_project = await db.projects.find_one({"_id": ObjectId(project_id)})
+        if updated_project:
+            project_name = await _resolve_project_name(updated_project, db)
+            for evt in updated_project.get("events", []):
+                if evt.get("id") == event_id:
+                    calendar_synced = await sync_event_to_calendar(
+                        db=db,
+                        project_id=project_id,
+                        event_id=event_id,
+                        action="update",
+                        project_vertical=updated_project.get("vertical"),
+                        title=f"{evt.get('type')} - {project_name}",
+                        start_time=evt.get("start_date"),
+                        end_time=evt.get("end_date"),
+                        calendar_event_id=evt.get("calendar_event_id")
+                    )
+                    return {"message": "Event updated successfully", "calendar_synced": calendar_synced}
+
+    return {"message": "Event updated successfully", "calendar_synced": False}
 
 # Legacy Deliverable Endpoints Removed - Now handled via /api/tasks
 

@@ -26,6 +26,7 @@ class EventModel(BaseModel):
     venue_location: Optional[str] = None
     start_date: datetime
     end_date: Optional[datetime] = None
+    calendar_event_id: Optional[str] = None
     deliverables: List[DeliverableModel] = Field(default_factory=list)
     assignments: List[AssignmentModel] = Field(default_factory=list)
     notes: str = ""
