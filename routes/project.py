@@ -231,6 +231,18 @@ async def list_projects(
     db: ScopedDatabase = Depends(get_db)
 ):
     """READ LIST: Get projects with pagination, filtering, and sorting"""
+    # Helper for robust date parsing inside the endpoint
+    def parse_event_date(date_val):
+        if not date_val: return None
+        if isinstance(date_val, datetime):
+            return date_val.replace(tzinfo=None)
+        if isinstance(date_val, str):
+            try:
+                return datetime.fromisoformat(date_val.replace('Z', '+00:00')).replace(tzinfo=None)
+            except ValueError:
+                return None
+        return None
+
     # Guardrail handles agency_id, so we just build the rest of the query
     query = {}
     
@@ -252,8 +264,12 @@ async def list_projects(
 
     if view == "upcoming":
         base_status_filter = {"status": "booked"}
+    elif view == "active":
+        base_status_filter = {"status": {"$in": ["booked", "Booked", "ongoing", "Ongoing", "production", "Production"]}}
     elif view == "ongoing":
-        base_status_filter = {"status": {"$in": ["ongoing", "Ongoing"]}}
+        base_status_filter = {"status": {"$in": ["ongoing", "Ongoing", "production", "Production"]}}
+    elif view == "production":
+        base_status_filter = {"status": {"$in": ["ongoing", "Ongoing", "production", "Production"]}}
     elif view == "enquiry":
         base_status_filter = {"status": {"$in": ["enquiry", "Enquiry"]}}
     elif view == "completed":
@@ -299,21 +315,97 @@ async def list_projects(
     # But 'search' score or 'upcoming' logic complicates it.
     
     # HYBRID APPROACH:
-    # If sort is 'upcoming', fetch ALL matching query (no skip/limit yet), sort in Py, then slice.
+    # If sort is 'upcoming' or view is 'production', fetch ALL matching query (no skip/limit yet), filter/sort in Py, then slice.
     # If sort is standard, use Mongo skip/limit.
     
     skip = (page - 1) * limit
 
-    if sort == "upcoming":
+    if view == "production":
+        cursor = db.projects.find(query)
+        all_projects = await cursor.to_list(length=1000)
+        
+        # We need to filter for projects that have at least one past event
+        # AND that specific event has incomplete tasks.
+        prod_projects = []
+        now = datetime.now()
+        
+        # Get all tasks for these projects at once to avoid N+1 queries
+        project_ids = [str(p["_id"]) for p in all_projects]
+        tasks_cursor = db.tasks.find({"project_id": {"$in": project_ids}})
+        all_tasks = await tasks_cursor.to_list(length=None)
+        
+        # Group tasks by project_id and event_id
+        tasks_by_proj_event = {}
+        for t in all_tasks:
+            pid = str(t.get("project_id"))
+            eid = str(t.get("event_id"))
+            if pid not in tasks_by_proj_event:
+                tasks_by_proj_event[pid] = {}
+            if eid not in tasks_by_proj_event[pid]:
+                tasks_by_proj_event[pid][eid] = []
+            tasks_by_proj_event[pid][eid].append(t)
+            
+        for p in all_projects:
+            pid = str(p["_id"])
+            is_production = False
+            for e in p.get("events", []):
+                event_date = parse_event_date(e.get("start_date"))
+                if not event_date: continue
+
+                # Check if event is in the past
+                if event_date < now:
+                    # Check tasks for THIS specific event
+                    eid = str(e.get("id"))
+                    event_tasks = tasks_by_proj_event.get(pid, {}).get(eid, [])
+                    if not event_tasks: continue # If no deliverables/tasks exist, it might not be production
+
+                    completed = sum(1 for t in event_tasks if t.get("status") == "done")
+                    total = len(event_tasks)
+                    
+                    if completed < total:
+                        is_production = True
+                        break # Found one qualifying event, so the project is in production
+            
+            if is_production:
+                prod_projects.append(p)
+                
+        # Now sort the filtered projects
+        def safe_sort_key(p):
+            if sort == "upcoming":
+                nows = datetime.now()
+                future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
+                future_dates = [d for d in future_events if d and d > nows]
+                return min(future_dates) if future_dates else datetime(9999, 12, 31)
+            
+            val = p.get("created_on")
+            if isinstance(val, datetime):
+                return val.replace(tzinfo=None)
+            elif isinstance(val, str):
+                try:
+                    return datetime.fromisoformat(val.replace("Z", "+00:00")).replace(tzinfo=None)
+                except ValueError:
+                    return datetime.min
+            return datetime.min
+
+        if sort == "upcoming":
+            prod_projects.sort(key=safe_sort_key)
+        else:
+            sort_order = -1 if sort == "newest" else 1
+            prod_projects.sort(key=safe_sort_key, reverse=(sort_order == -1))
+        
+        total = len(prod_projects)
+        paginated_data = prod_projects[skip : skip + limit]
+
+    elif sort == "upcoming":
         # Fetch ALL matching basics
         cursor = db.projects.find(query)
         all_projects = await cursor.to_list(length=1000) # Safety cap
         
         def get_next_event_date(p):
             now = datetime.now()
-            future_events = [e["start_date"] for e in p.get("events", []) if isinstance(e.get("start_date"), str) and e["start_date"] > now.isoformat()]
-            # If no future events, push to end (year 9999)
-            return min(future_events) if future_events else "9999-12-31"
+            future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
+            future_dates = [d for d in future_events if d and d > now]
+            return min(future_dates) if future_dates else datetime(9999, 12, 31)
 
         all_projects.sort(key=get_next_event_date)
         

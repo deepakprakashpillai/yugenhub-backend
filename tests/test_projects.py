@@ -44,6 +44,16 @@ async def test_create_and_get_project(async_client: AsyncClient, auth_headers: d
     assert get_resp.status_code == 200
     assert get_resp.json()["vertical"] == "wedding"
 
+    # Test Active View
+    active_resp = await async_client.get("/api/projects?view=active", headers=auth_headers)
+    assert active_resp.status_code == 200
+    assert isinstance(active_resp.json()["data"], list)
+
+    # Test Production View
+    prod_resp = await async_client.get("/api/projects?view=production", headers=auth_headers)
+    assert prod_resp.status_code == 200
+    assert isinstance(prod_resp.json()["data"], list)
+
 
 async def test_create_project_invalid_vertical(async_client: AsyncClient, auth_headers: dict):
     resp = await async_client.post("/api/projects", json={"vertical": "invalid_magic_vertical", "client_id": "dummy"}, headers=auth_headers)
