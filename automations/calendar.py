@@ -125,3 +125,48 @@ async def sync_event_to_calendar(
     except Exception as e:
         logger.error(f"Unexpected error during calendar sync for event {event_id}: {str(e)}")
         return False
+
+async def sync_attendee_to_calendar(
+    db: ScopedDatabase,
+    calendar_event_id: str,
+    email: str,
+    action: str
+) -> bool:
+    """
+    Syncs an attendee (add or remove) to an existing calendar event via n8n webhook.
+    Supported actions: 'add_attendee', 'remove_attendee'
+    """
+    # 1. Check Global Config
+    config = await db.agency_configs.find_one({})
+    if not config:
+        return False
+        
+    automations_config = config.get("automations", {})
+    if not automations_config.get("calendar_enabled", False):
+        logger.info(f"Attendee sync bypassed for event {calendar_event_id} - global integration disabled in settings.")
+        return False
+
+    payload = {
+        "action": action,
+        "calendar_event_id": calendar_event_id,
+        "email": email
+    }
+
+    try:
+        # Reduced timeout since we are making the caller wait
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                WEBHOOK_URL,
+                json=payload,
+                timeout=3.0
+            )
+            response.raise_for_status()
+            logger.info(f"Successfully synced calendar attendee action '{action}' for event {calendar_event_id}")
+            return True
+                
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP Error during calendar attendee sync for event {calendar_event_id}: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error during calendar attendee sync for event {calendar_event_id}: {str(e)}")
+        return False
