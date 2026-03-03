@@ -6,7 +6,10 @@ from datetime import timedelta
 
 # Set up test environment variables before anything else
 worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+run_id = os.environ.get("GITHUB_RUN_ID", "")
 db_name = f"yugen_hub_test_{worker_id}"
+if run_id:
+    db_name += f"_{run_id}"
 
 os.environ["ENV"] = "testing"
 os.environ["DB_NAME"] = db_name

@@ -6,7 +6,6 @@ import certifi
 logger = get_logger("database")
 
 uri = config.MONGO_URI
-db_name = config.DB_NAME
 
 if uri:
     logger.info(f"MongoDB connection string found: {uri[:20]}...")
@@ -24,8 +23,8 @@ class DatabaseProxy:
                 self._client = AsyncIOMotorClient(uri, tlsCAFile=certifi.where())
             else:
                 self._client = AsyncIOMotorClient(uri, tlsAllowInvalidCertificates=True)
-            self._db = self._client[db_name]
-            logger.info(f"Database collections initialized on DB: {db_name}")
+            self._db = self._client[config.DB_NAME]
+            logger.info(f"Database collections initialized on DB: {config.DB_NAME}")
 
     def reset(self):
         if self._client is not None:
@@ -46,13 +45,13 @@ client = DatabaseProxy()
 
 class DBProxy:
     def get_collection(self, name):
-        return client[db_name][name]
+        return client[config.DB_NAME][name]
 
     def __getattr__(self, attr):
-        return client[db_name][attr]
+        return client[config.DB_NAME][attr]
         
     def __getitem__(self, key):
-        return client[db_name][key]
+        return client[config.DB_NAME][key]
 
 db = DBProxy()
 

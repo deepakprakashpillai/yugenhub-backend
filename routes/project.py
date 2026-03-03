@@ -15,7 +15,7 @@ from logging_config import get_logger
 from config import config
 from utils.email import send_event_assignment_email
 from utils.push import send_push_notification
-from automations.calendar import sync_event_to_calendar
+from automations.calendar import sync_event_to_calendar, sync_attendee_to_calendar
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
@@ -65,7 +65,7 @@ async def notify_associate_assignment(db: ScopedDatabase, background_tasks: Back
     Send a notification to an associate when they are assigned to an event.
     Looks up the associate's email, finds the corresponding user, and creates notification.
     """
-    if not associate_id:
+    if not associate_id or not ObjectId.is_valid(associate_id):
         return
     
     # Find associate and their email
@@ -257,7 +257,7 @@ async def create_project(
                     )
                     all_new_tasks.append(task.model_dump())
             
-            # b. Send Notifications for Assignments
+            # b. Send Notifications & Sync Attendees for Assignments
             if event.assignments:
                 for assignment in event.assignments:
                     await notify_associate_assignment(
@@ -269,6 +269,20 @@ async def create_project(
                         event.start_date,
                         current_user.agency_id
                     )
+                    
+                    if sync_result and isinstance(sync_result, str):
+                        if ObjectId.is_valid(assignment.associate_id):
+                            associate = await db.associates.find_one({"_id": ObjectId(assignment.associate_id)})
+                            if associate:
+                                email = associate.get("email_id") or associate.get("email")
+                                if email:
+                                    background_tasks.add_task(
+                                        sync_attendee_to_calendar,
+                                        db=db,
+                                        calendar_event_id=sync_result,
+                                        email=email,
+                                        action="add_attendee"
+                                    )
         
         if all_new_tasks:
             await db.tasks.insert_many(all_new_tasks)
@@ -732,6 +746,7 @@ async def add_event_to_project(
 
     # Sync to external calendar (Synchronous)
     calendar_synced = False
+    sync_result = None
     if project_doc:
         project_name = await _resolve_project_name(project_doc, db)
         sync_result = await sync_event_to_calendar(
@@ -754,6 +769,35 @@ async def add_event_to_project(
             )
         elif sync_result:
              calendar_synced = True
+
+    # Handle Team Assignments (Notifications and Calendar Sync)
+    if event.assignments:
+        for assignment in event.assignments:
+            # Note: We send standard assignment notifications
+            await notify_associate_assignment(
+                db,
+                background_tasks,
+                assignment.associate_id,
+                project_code,
+                event.type,
+                event.start_date,
+                current_user.agency_id
+            )
+            
+            # If the event was synced and we have a valid ID, add attendee to the calendar event
+            if sync_result and isinstance(sync_result, str):
+                 if ObjectId.is_valid(assignment.associate_id):
+                     associate = await db.associates.find_one({"_id": ObjectId(assignment.associate_id)})
+                     if associate:
+                          email = associate.get("email_id") or associate.get("email")
+                          if email:
+                              background_tasks.add_task(
+                                  sync_attendee_to_calendar,
+                                  db=db,
+                                  calendar_event_id=sync_result,
+                                  email=email,
+                                  action="add_attendee"
+                              )
 
     new_tasks = []
     if event.deliverables:
@@ -1009,6 +1053,23 @@ async def add_assignment(
         current_user.agency_id
     )
 
+    # Sync Attendee to Calendar 
+    if project:
+        target_event = next((evt for evt in project.get("events", []) if evt.get("id") == event_id), None)
+        if target_event and target_event.get("calendar_event_id"):
+            if ObjectId.is_valid(assignment.associate_id):
+                associate = await db.associates.find_one({"_id": ObjectId(assignment.associate_id)})
+                if associate:
+                    email = associate.get("email_id") or associate.get("email")
+                    if email:
+                        background_tasks.add_task(
+                            sync_attendee_to_calendar,
+                            db=db,
+                            calendar_event_id=target_event.get("calendar_event_id"),
+                            email=email,
+                            action="add_attendee"
+                        )
+
     return {"message": "Assignment added successfully", "id": assignment.id}
 
 @router.patch("/{project_id}/events/{event_id}/assignments/{assignment_id}")
@@ -1050,6 +1111,26 @@ async def delete_assignment(
     """DELETE: Remove an assignment"""
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    # Sync Attendee Removal from Calendar before we delete the assignment from DB
+    project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if project_doc:
+        target_event = next((evt for evt in project_doc.get("events", []) if evt.get("id") == event_id), None)
+        if target_event and target_event.get("calendar_event_id"):
+            # Find the associate_id from the assignment we are deleting
+            target_assignment = next((a for a in target_event.get("assignments", []) if a.get("id") == assignment_id), None)
+            if target_assignment and target_assignment.get("associate_id") and ObjectId.is_valid(target_assignment.get("associate_id")):
+                associate = await db.associates.find_one({"_id": ObjectId(target_assignment.get("associate_id"))})
+                if associate:
+                    email = associate.get("email_id") or associate.get("email")
+                    if email:
+                         background_tasks.add_task(
+                             sync_attendee_to_calendar,
+                             db=db,
+                             calendar_event_id=target_event.get("calendar_event_id"),
+                             email=email,
+                             action="remove_attendee"
+                         )
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id), "events.id": event_id},
