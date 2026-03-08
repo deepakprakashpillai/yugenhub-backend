@@ -36,4 +36,7 @@ class Config:
     VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
     VAPID_CLAIM_EMAIL = os.getenv("VAPID_CLAIM_EMAIL", "mailto:team@yugenco.in")
 
+    # --- n8n Integration Settings ---
+    N8N_API_KEY = os.getenv("N8N_API_KEY")
+
 config = Config()

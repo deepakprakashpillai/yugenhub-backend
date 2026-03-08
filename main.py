@@ -7,7 +7,7 @@ from logging_config import get_logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from middleware import RequestLifecycleMiddleware
-from routes import associate, client, config as config_router, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance, push
+from routes import associate, client, config as config_router, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance, push, integration
 from config import config
 
 logger = get_logger("app")
@@ -41,6 +41,7 @@ app.include_router(settings.router)
 app.include_router(templates.router)
 app.include_router(finance.router)
 app.include_router(push.router)
+app.include_router(integration.router)
 
 logger.info("All routers registered, YugenHub API ready")
 
