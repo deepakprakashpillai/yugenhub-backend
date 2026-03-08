@@ -1,5 +1,6 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import OAuth2PasswordBearer
+import secrets
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
@@ -114,3 +115,30 @@ def require_finance_access():
             detail="Access Denied: Finance data is restricted."
         )
     return checker
+
+
+# ─── n8n Integration Auth ────────────────────────────────────────────────────
+
+from fastapi.security import APIKeyHeader
+
+_api_key_header = APIKeyHeader(name="X-API-Key")
+
+
+async def get_integration_db(
+    agency_id: str,
+    api_key: str = Security(_api_key_header),
+) -> ScopedDatabase:
+    """
+    Validates the n8n API key and returns a ScopedDatabase
+    scoped to the requested agency_id.
+    """
+    if not config.N8N_API_KEY:
+        logger.warning("Integration endpoint called but N8N_API_KEY is not configured")
+        raise HTTPException(status_code=503, detail="Integration not configured")
+
+    if not secrets.compare_digest(api_key, config.N8N_API_KEY):
+        logger.warning("Integration auth failed: invalid API key")
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    return ScopedDatabase(raw_db, agency_id)
+
