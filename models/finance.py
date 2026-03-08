@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 import uuid
 
@@ -16,8 +16,8 @@ class AccountModel(BaseModel):
     current_balance: float = 0.0
     currency: str = "INR"
     is_active: bool = True
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -33,7 +33,7 @@ class TransactionModel(BaseModel):
     agency_id: str = "default"
     type: Literal['income', 'expense', 'transfer']
     amount: float
-    date: datetime = Field(default_factory=datetime.now)
+    date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     account_id: str  # The account affected
     # For transfers, we might linked_transaction_id or create two records.
     # Pattern: Transfer creates 2 transaction records:
@@ -55,7 +55,7 @@ class TransactionModel(BaseModel):
     status: Literal['completed', 'pending', 'cancelled'] = 'completed'
     
     created_by: Optional[str] = "system"
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -78,7 +78,7 @@ class ClientLedgerModel(BaseModel):
     balance_amount: float = 0.0   # total_value - received_amount
     
     status: Literal['pending', 'partially_paid', 'settled'] = 'pending'
-    last_updated: datetime = Field(default_factory=datetime.now)
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -108,8 +108,8 @@ class InvoiceModel(BaseModel):
     status: Literal['draft', 'sent', 'partially_paid', 'paid'] = 'draft'
     due_date: Optional[datetime] = None
     
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -134,8 +134,8 @@ class AssociatePayoutModel(BaseModel):
     due_date: Optional[datetime] = None
     
     notes: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
         populate_by_name=True,

@@ -8,6 +8,7 @@ from fastapi import Depends
 from middleware.db_guard import ScopedDatabase
 from bson import ObjectId
 from logging_config import get_logger
+from datetime import datetime, timezone
 
 router = APIRouter(
     prefix="/api/clients",
@@ -74,9 +75,6 @@ async def get_clients(
         "data": clients
     }
 
-    return {
-        "client_types": list(client_types)
-    }
 
 @router.get("/stats")
 async def get_client_stats(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
@@ -93,8 +91,7 @@ async def get_client_stats(current_user: UserModel = Depends(get_current_user), 
     active = await db.clients.count_documents(active_query)
 
     # 3. New This Month
-    from datetime import datetime
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     start_of_month = datetime(now.year, now.month, 1)
     
     month_query = base_query.copy()
@@ -134,6 +131,13 @@ async def update_client(client_id: str, update_data: dict = Body(...), current_u
     """UPDATE: Modify an existing client"""
     if not ObjectId.is_valid(client_id):
         raise HTTPException(status_code=400, detail="Invalid Client ID format")
+
+    # Filter to allowed fields to prevent overwriting protected fields
+    allowed_fields = {"name", "phone", "email", "location", "type", "notes", "metadata", "total_projects"}
+    update_data = {k: v for k, v in update_data.items() if k in allowed_fields}
+    
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
 
     updated_client = await db.clients.find_one_and_update(
         {"_id": ObjectId(client_id)},

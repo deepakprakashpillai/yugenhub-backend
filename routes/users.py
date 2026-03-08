@@ -20,6 +20,10 @@ def parse_mongo_data(data):
 @router.get("", response_model=List[dict])
 async def list_users(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """List all users for assignment dropdowns"""
-    # In the future, might want to restrict this or filter by agency
     users = await db.users.find({}).to_list(1000)
-    return parse_mongo_data(users)
+    # Only return fields needed for assignment dropdowns — avoid leaking sensitive data
+    safe_fields = ["id", "name", "email", "picture", "role"]
+    return [
+        {k: parse_mongo_data(u.get(k)) if isinstance(u.get(k), dict) else u.get(k) for k in safe_fields if k in u}
+        for u in users
+    ]

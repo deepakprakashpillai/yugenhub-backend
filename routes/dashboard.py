@@ -31,7 +31,7 @@ def parse_mongo_data(data):
 async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Enriched stats for both Admin and Member views"""
     # current_agency_id handled by db wrapper
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     
     # RBAC: Scope to user's allowed verticals
     user_verticals = await get_user_verticals(current_user, db)
@@ -72,7 +72,7 @@ async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user
 @router.get("/attention")
 async def get_attention_items(scope: str = "global", current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Status checks for Overdue, Blocked, and Risk items"""
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     items = []
     
     # Filter base
@@ -156,7 +156,7 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
 @router.get("/workload")
 async def get_workload_stats(scope: str = "global", current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Workload intelligence"""
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     today_start = datetime(now.year, now.month, now.day)
     week_end = today_start + timedelta(days=7)
     
@@ -239,7 +239,7 @@ async def get_project_pipeline(current_user: UserModel = Depends(get_current_use
 @router.get("/schedule")
 async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Get upcoming events list with Client and Team details"""
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     next_2_weeks = now + timedelta(days=14) 
     
     # RBAC: Scope to user's allowed verticals
@@ -275,7 +275,7 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
         if event.get("client_id"):
             try:
                 client_ids.append(ObjectId(event["client_id"]))
-            except:
+            except Exception:
                 pass
         for assign in event.get("assignments", []):
             if assign.get("associate_id"):
@@ -293,7 +293,7 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
     for aid in associate_ids:
         try:
             associate_oids.append(ObjectId(aid))
-        except:
+        except Exception:
             pass
             
     associates = await db.associates.find({"_id": {"$in": associate_oids}}).to_list(None)

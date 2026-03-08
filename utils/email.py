@@ -86,7 +86,7 @@ def base_email_template(title: str, preheader: str, content: str, cta_url: str =
                             <td style="background-color: #f9fafb; padding: 24px 32px; text-align: center; border-top: 1px solid #e5e7eb;">
                                 <p style="color: #6b7280; font-size: 13px; margin: 0; line-height: 1.5;">
                                     {footer_text}<br>
-                                    © {config.ENV == "production" and "2026" or "2024"} Yugen Hub. All rights reserved.
+                                    © {datetime.now().year} Yugen Hub. All rights reserved.
                                 </p>
                             </td>
                         </tr>

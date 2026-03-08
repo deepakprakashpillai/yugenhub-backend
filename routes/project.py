@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Body, HTTPException, Query, BackgroundTasks
 import re # IMPORTED
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 # REMOVED raw collection imports
-from database import notifications_collection
 from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
@@ -143,7 +142,7 @@ async def get_next_sequence_value(db: ScopedDatabase, vertical: str) -> str:
     Generate a sequential project code: [PREFIX]-[YEAR]-[SEQ]
     Example: KN-2026-0001
     """
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     year = now.year
     prefix = vertical[:2].upper()
     
@@ -401,7 +400,7 @@ async def list_projects(
         # We need to filter for projects that have at least one past event
         # AND that specific event has incomplete tasks.
         prod_projects = []
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         
         # Get all tasks for these projects at once to avoid N+1 queries
         project_ids = [str(p["_id"]) for p in all_projects]
@@ -446,7 +445,7 @@ async def list_projects(
         # Now sort the filtered projects
         def safe_sort_key(p):
             if sort == "upcoming":
-                nows = datetime.now()
+                nows = datetime.now(timezone.utc)
                 future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
                 future_dates = [d for d in future_events if d and d > nows]
                 return min(future_dates) if future_dates else datetime(9999, 12, 31)
@@ -476,7 +475,7 @@ async def list_projects(
         all_projects = await cursor.to_list(length=1000) # Safety cap
         
         def get_next_event_date(p):
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
             future_dates = [d for d in future_events if d and d > now]
             return min(future_dates) if future_dates else datetime(9999, 12, 31)
@@ -584,15 +583,15 @@ async def delete_project(id: str, background_tasks: BackgroundTasks, current_use
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="Invalid ID")
     
-    # Cascade Delete Tasks (db.tasks uses studio_id automatically)
-    await db.tasks.delete_many({"project_id": id})
-
     # RBAC: Check vertical access before deleting
     project = await db.projects.find_one({"_id": ObjectId(id)})
     if project:
         user_verticals = await get_user_verticals(current_user, db)
         if project.get("vertical") and project["vertical"] not in user_verticals:
             raise HTTPException(status_code=404, detail="Project not found")
+
+        # Cascade Delete Tasks AFTER RBAC check (db.tasks uses studio_id automatically)
+        await db.tasks.delete_many({"project_id": id})
 
         # Send calendar delete actions for any tracked events
         for event in project.get("events", []):
@@ -642,7 +641,7 @@ async def delete_event(project_id: str, event_id: str, background_tasks: Backgro
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
-        {"$pull": {"events": {"id": event_id}}, "$set": {"updated_on": datetime.now()}}
+        {"$pull": {"events": {"id": event_id}}, "$set": {"updated_on": datetime.now(timezone.utc)}}
     )
     
     if result.modified_count == 0:
@@ -674,7 +673,7 @@ async def get_project_stats(vertical: str = None, current_user: UserModel = Depe
 
     # 3. This Month (Active Projects having events in the current month)
     # MUST be a subset of 'active' to ensure logical numbers (This Month <= Active)
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     start_of_month = datetime(now.year, now.month, 1)
     if now.month == 12:
         next_month = datetime(now.year + 1, 1, 1)
@@ -729,7 +728,7 @@ async def add_event_to_project(
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
-        {"$push": {"events": event.model_dump()}, "$set": {"updated_on": datetime.now()}}
+        {"$push": {"events": event.model_dump()}, "$set": {"updated_on": datetime.now(timezone.utc)}}
     )
 
     if result.modified_count == 0:
@@ -850,7 +849,7 @@ async def update_project(
     update_data.pop("assignments", None)  # Handled by dedicated endpoints
     update_data.pop("code", None) 
     update_data.pop("agency_id", None) 
-    update_data["updated_on"] = datetime.now()
+    update_data["updated_on"] = datetime.now(timezone.utc)
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
@@ -959,7 +958,7 @@ async def update_event(
                         "due_date": deliverable.get('due_date'),
                         "quantity": deliverable.get("quantity", 1),
                         "title": f"{deliverable.get('type', 'Deliverable')} ({event_type})",
-                        "updated_on": datetime.now()
+                        "updated_on": datetime.now(timezone.utc)
                     }}
                 )
         
@@ -969,7 +968,7 @@ async def update_event(
 
     # Prefix keys with "events.$." to update the matched array element
     set_fields = {f"events.$.{k}": v for k, v in update_data.items()}
-    set_fields["updated_on"] = datetime.now()
+    set_fields["updated_on"] = datetime.now(timezone.utc)
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id), "events.id": event_id},
@@ -1036,7 +1035,7 @@ async def add_assignment(
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id), "events.id": event_id},
-        {"$push": {"events.$.assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now()}}
+        {"$push": {"events.$.assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now(timezone.utc)}}
     )
 
     if result.matched_count == 0:
@@ -1087,7 +1086,7 @@ async def update_assignment(
 
     # Prefix keys for arrayFilters
     set_fields = {f"events.$[evt].assignments.$[asn].{k}": v for k, v in update_data.items()}
-    set_fields["updated_on"] = datetime.now()
+    set_fields["updated_on"] = datetime.now(timezone.utc)
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
@@ -1105,6 +1104,7 @@ async def delete_assignment(
     project_id: str, 
     event_id: str, 
     assignment_id: str, 
+    background_tasks: BackgroundTasks,
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
 ):
@@ -1134,7 +1134,7 @@ async def delete_assignment(
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id), "events.id": event_id},
-        {"$pull": {"events.$.assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now()}}
+        {"$pull": {"events.$.assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now(timezone.utc)}}
     )
 
     if result.modified_count == 0:
@@ -1162,7 +1162,7 @@ async def add_project_assignment(
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
-        {"$push": {"assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now()}}
+        {"$push": {"assignments": assignment.model_dump()}, "$set": {"updated_on": datetime.now(timezone.utc)}}
     )
 
     if result.matched_count == 0:
@@ -1174,7 +1174,7 @@ async def add_project_assignment(
         assignment.associate_id,
         project.get("code", "Unknown"),
         "Project Assignment",
-        datetime.now(),
+        datetime.now(timezone.utc),
         current_user.agency_id
     )
 
@@ -1193,7 +1193,7 @@ async def update_project_assignment(
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
     set_fields = {f"assignments.$[asn].{k}": v for k, v in update_data.items()}
-    set_fields["updated_on"] = datetime.now()
+    set_fields["updated_on"] = datetime.now(timezone.utc)
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
@@ -1219,7 +1219,7 @@ async def delete_project_assignment(
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
-        {"$pull": {"assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now()}}
+        {"$pull": {"assignments": {"id": assignment_id}}, "$set": {"updated_on": datetime.now(timezone.utc)}}
     )
 
     if result.modified_count == 0:

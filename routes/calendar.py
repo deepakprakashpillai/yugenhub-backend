@@ -109,7 +109,6 @@ async def get_calendar_events(
                 })
 
     # 2. FETCH TASKS (Deliverables + General Tasks with Due Dates)
-    # 2. FETCH TASKS (Deliverables + General Tasks with Due Dates)
     if type != "event":  # Skip if only events requested
         task_query = {} # ScopedDB adds agency/studio filter implicitly
         

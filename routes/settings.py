@@ -9,7 +9,7 @@ from defaults import DEFAULT_AGENCY_CONFIG
 from config import config
 from utils.email import send_invite_email, send_role_change_email
 from logging_config import get_logger
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 import copy
 
@@ -131,7 +131,7 @@ async def sync_user_to_associate(db: ScopedDatabase, user_data: dict, associate_
         "is_active": True,
         "linked_user_id": user_data.get("id"),
         "agency_id": user_data.get("agency_id"),
-        "created_at": datetime.now(),
+        "created_at": datetime.now(timezone.utc),
     }
     await db.associates.insert_one(associate)
     logger.info(f"Auto-created associate for invited user", extra={"data": {"email": email}})
@@ -188,7 +188,7 @@ async def invite_user(
         "agency_id": current_user.agency_id,
         "role": role,
         "status": "pending",
-        "created_at": datetime.now(),
+        "created_at": datetime.now(timezone.utc),
         "last_login": None,
         "invited_by": current_user.id,
         "allowed_verticals": allowed_verticals,
@@ -559,7 +559,7 @@ async def delete_status(
     # 1. Reassign all projects with the deleted status
     result = await db.projects.update_many(
         {"status": delete_id},
-        {"$set": {"status": reassign_to, "updated_on": datetime.now()}}
+        {"$set": {"status": reassign_to, "updated_on": datetime.now(timezone.utc)}}
     )
     reassigned_count = result.modified_count
 
@@ -826,9 +826,15 @@ async def update_automations(
     if automations is None:
         raise HTTPException(status_code=400, detail="'automations' field required")
 
+    # Only allow known automation fields to prevent arbitrary data injection
+    allowed_keys = {"calendar_enabled", "calendar_notifications_enabled"}
+    filtered = {k: v for k, v in automations.items() if k in allowed_keys and isinstance(v, bool)}
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No valid automation fields to update")
+
     await db.agency_configs.update_one(
         {},
-        {"$set": {"automations": automations}}
+        {"$set": {"automations": filtered}}
     )
     logger.info(
         f"Automations config updated",
