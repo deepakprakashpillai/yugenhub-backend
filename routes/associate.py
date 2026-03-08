@@ -12,7 +12,7 @@ from models.user import UserModel
 from fastapi import Depends
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 router = APIRouter(
@@ -61,8 +61,8 @@ async def sync_inhouse_to_user(db: ScopedDatabase, associate_data: dict, agency_
         "picture": None,
         # agency_id will be injected by db.users.insert_one
         "role": "member",
-        "created_at": datetime.now(),
-        "last_login": datetime.now()
+        "created_at": datetime.now(timezone.utc),
+        "last_login": datetime.now(timezone.utc)
     }
     
     await db.users.insert_one(new_user)
@@ -124,10 +124,6 @@ async def get_associates(
         "data": associates
     }
 
-    return {
-        "roles": list(roles),
-        "employment_types": list(employment_types)
-    }
 
 @router.get("/stats")
 async def get_associate_stats(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
@@ -144,8 +140,7 @@ async def get_associate_stats(current_user: UserModel = Depends(get_current_user
     active = await db.associates.count_documents(active_query)
 
     # 3. New This Month
-    from datetime import datetime
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     start_of_month = datetime(now.year, now.month, 1)
     
     month_query = base_query.copy()
@@ -218,6 +213,14 @@ async def update_associate(
                 detail="In-house associates must have an email address for login."
             )
     
+    # Filter to allowed fields to prevent overwriting protected fields
+    allowed_fields = {"name", "phone_number", "email_id", "primary_role", "employment_type", 
+                      "base_city", "is_active", "notes", "metadata", "linked_user_id"}
+    update_data = {k: v for k, v in update_data.items() if k in allowed_fields}
+    
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
     updated_doc = await db.associates.find_one_and_update(
         {"_id": ObjectId(associate_id)},
         {"$set": update_data},

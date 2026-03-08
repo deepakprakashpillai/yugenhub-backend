@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 import uuid
 
@@ -41,7 +41,7 @@ class ProjectModel(BaseModel):
     events: List[EventModel] = Field(default_factory=list)
     assignments: List[AssignmentModel] = Field(default_factory=list)  # Project-level team (for non-event verticals)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_on: datetime = Field(default_factory=datetime.now)
-    updated_on: datetime = Field(default_factory=datetime.now)
+    created_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(populate_by_name=True)

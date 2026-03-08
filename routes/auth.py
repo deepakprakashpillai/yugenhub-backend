@@ -3,8 +3,8 @@ from google.oauth2 import id_token
 from google.auth.transport import requests
 from database import users_collection 
 from models.user import UserModel
-from routes.deps import create_access_token
-from datetime import datetime
+from routes.deps import create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
+from datetime import datetime, timedelta, timezone
 from logging_config import get_logger
 import os
 from config import config
@@ -55,7 +55,7 @@ async def google_login(token_data: dict = Body(...)):
         current_user = UserModel(**user_doc)
         
         # Only update if changed
-        update_data = {"last_login": datetime.now(), "status": "active"}
+        update_data = {"last_login": datetime.now(timezone.utc), "status": "active"}
         if not current_user.google_id:
             update_data["google_id"] = google_id # Link account if not linked
         if picture and current_user.picture != picture:
@@ -72,7 +72,8 @@ async def google_login(token_data: dict = Body(...)):
         
         # 4. Issue Internal JWT
         access_token = create_access_token(
-            data={"sub": current_user.id, "agency_id": current_user.agency_id}
+            data={"sub": current_user.id, "agency_id": current_user.agency_id},
+            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
 
         logger.info(
@@ -99,7 +100,7 @@ async def google_login(token_data: dict = Body(...)):
         raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"Authentication failed with unexpected error: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Authentication failed. Please try again.")
 
 
 # ============ DEV-ONLY ENDPOINTS ============
@@ -138,7 +139,8 @@ async def dev_login(user_id: str):
 
     user = UserModel(**user_doc)
     access_token = create_access_token(
-        data={"sub": user.id, "agency_id": user.agency_id}
+        data={"sub": user.id, "agency_id": user.agency_id},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
 
     logger.info(f"Dev login successful", extra={"data": {"user_id": user.id, "email": user.email, "agency_id": user.agency_id}})

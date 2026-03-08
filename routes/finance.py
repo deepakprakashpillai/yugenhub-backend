@@ -1,7 +1,7 @@
 import uuid
 from fastapi import APIRouter, HTTPException, Query, Depends, status, Body
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from models.finance import AccountModel, TransactionModel, ClientLedgerModel, InvoiceModel, AssociatePayoutModel
 from bson import ObjectId
 
@@ -30,7 +30,7 @@ async def update_account_balance(db: ScopedDatabase, account_id: str, amount: fl
             {"id": account_id},
             {
                 "$inc": {"current_balance": inc_amount},
-                "$set": {"updated_at": datetime.now()}
+                "$set": {"updated_at": datetime.now(timezone.utc)}
             }
         )
 
@@ -57,7 +57,7 @@ async def update_client_ledger(db: ScopedDatabase, client_id: str, amount: float
         update_query = {"$inc": {"received_amount": amount}}
     
     if update_query:
-        update_query["$set"] = {"last_updated": datetime.now()}
+        update_query["$set"] = {"last_updated": datetime.now(timezone.utc)}
         await db.ledgers.update_one({"client_id": client_id}, update_query)
 
     # 3. Recalculate Balance & Status
@@ -192,7 +192,7 @@ async def update_invoice(invoice_id: str, invoice_data: InvoiceModel, db: Scoped
         await update_client_ledger(db, old_invoice["client_id"], -old_invoice["total_amount"], "invoice_created")
 
     update_dict = invoice_data.model_dump(exclude={"id", "created_at"})
-    update_dict["updated_at"] = datetime.now()
+    update_dict["updated_at"] = datetime.now(timezone.utc)
     
     await db.invoices.update_one(
         {"id": invoice_id},
@@ -205,7 +205,11 @@ async def update_invoice(invoice_id: str, invoice_data: InvoiceModel, db: Scoped
     return {**invoice_data.model_dump(), "id": invoice_id}
 
 @router.post("/invoices/{invoice_id}/status")
-async def update_invoice_status(invoice_id: str, status: str, db: ScopedDatabase = Depends(get_db)):
+async def update_invoice_status(invoice_id: str, body: dict = Body(...), db: ScopedDatabase = Depends(get_db)):
+    status = body.get("status")
+    if not status:
+        raise HTTPException(status_code=400, detail="'status' field is required")
+    
     invoice = await db.invoices.find_one({"id": invoice_id})
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -215,7 +219,7 @@ async def update_invoice_status(invoice_id: str, status: str, db: ScopedDatabase
         
     await db.invoices.update_one(
         {"id": invoice_id},
-        {"$set": {"status": status, "updated_at": datetime.now()}}
+        {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
     )
     return {"status": "success"}
 

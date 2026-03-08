@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from datetime import datetime
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone
 
 class PushSubscriptionKeys(BaseModel):
     p256dh: str
@@ -10,4 +10,4 @@ class PushSubscriptionModel(BaseModel):
     agency_id: str
     endpoint: str
     keys: PushSubscriptionKeys
-    created_at: datetime = datetime.now()
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

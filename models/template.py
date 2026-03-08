@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from .project import DeliverableModel, AssignmentModel
 
@@ -23,12 +23,12 @@ class ProjectTemplateModel(BaseModel):
     description: Optional[str] = None
     events: List[TemplateEventModel] = []
     metadata: Dict[str, Any] = {}
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    class Config:
-        populate_by_name = True
-        json_schema_extra = {
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
             "example": {
                 "vertical": "knots",
                 "name": "Standard Hindu Wedding",
@@ -37,3 +37,4 @@ class ProjectTemplateModel(BaseModel):
                 "metadata": {"religion": "Hindu"}
             }
         }
+    )

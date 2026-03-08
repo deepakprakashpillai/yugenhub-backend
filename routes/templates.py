@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Body, HTTPException, Depends, Query
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from database import projects_collection # Fallback if needed, but we use db
 from models.template import ProjectTemplateModel
 from models.user import UserModel
 from routes.deps import get_current_user, get_db, require_role, get_user_verticals
@@ -146,7 +145,7 @@ async def update_template(
         
     update_data.pop("_id", None)
     update_data.pop("agency_id", None)
-    update_data["updated_at"] = datetime.now()
+    update_data["updated_at"] = datetime.now(timezone.utc)
     
     result = await db.templates.update_one(
         {"_id": ObjectId(template_id)},

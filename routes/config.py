@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Body, HTTPException, Depends
 # REMOVED raw collection imports
 from models.config import AgencyConfigModel
-from routes.deps import get_current_user, get_db
+from routes.deps import get_current_user, get_db, require_role
 from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
@@ -28,7 +28,7 @@ async def get_config(current_user: UserModel = Depends(get_current_user), db: Sc
 @router.post("/init")
 async def initialize_config(
     config: AgencyConfigModel = Body(...), 
-    current_user: UserModel = Depends(get_current_user),
+    current_user: UserModel = Depends(require_role("owner")),
     db: ScopedDatabase = Depends(get_db)
 ):
     # Override agency_id with user's specific agency

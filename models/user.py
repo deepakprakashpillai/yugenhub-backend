@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import Optional, Literal, List
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 class UserModel(BaseModel):
@@ -13,7 +13,7 @@ class UserModel(BaseModel):
     agency_id: str
     role: Literal['owner', 'admin', 'member'] = "owner"
     status: str = "active"
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login: Optional[datetime] = None
     # RBAC: Per-user access control
     allowed_verticals: List[str] = Field(default_factory=list)  # Empty = all verticals

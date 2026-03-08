@@ -118,7 +118,13 @@ async def list_tasks_grouped(
             ]
         }},
         # Lookup project details
-        {"$addFields": {"project_oid": {"$toObjectId": "$project_id"}}},
+        {"$addFields": {"project_oid": {
+            "$cond": {
+                "if": {"$and": [{"$ne": ["$project_id", None]}, {"$ne": ["$project_id", ""]}]},
+                "then": {"$toObjectId": "$project_id"},
+                "else": None
+            }
+        }}},
         {"$lookup": {
             "from": "projects",
             "localField": "project_oid",
@@ -372,7 +378,13 @@ async def list_tasks(
     # Convert string project_id to ObjectId for lookup
     pipeline.append({
         "$addFields": {
-            "project_oid": {"$toObjectId": "$project_id"}
+            "project_oid": {
+            "$cond": {
+                "if": {"$and": [{"$ne": ["$project_id", None]}, {"$ne": ["$project_id", ""]}]},
+                "then": {"$toObjectId": "$project_id"},
+                "else": None
+            }
+        }
         }
     })
     

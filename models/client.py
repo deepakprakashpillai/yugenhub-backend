@@ -1,7 +1,7 @@
 # models/client.py
 from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 from typing import Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 
 class ClientModel(BaseModel):
     id: Optional[str] = None
@@ -18,8 +18,8 @@ class ClientModel(BaseModel):
     type: Literal['Lead', 'Active Client', 'Legacy', 'Agency'] = 'Lead'
     
     # Mongoose timestamps: true equivalent
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator('email', mode='before')
     @classmethod

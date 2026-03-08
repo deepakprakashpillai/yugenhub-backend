@@ -1,7 +1,7 @@
 # models/associate.py
 from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 from typing import Optional, Literal, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 
 class AssociateModel(BaseModel):
@@ -16,7 +16,7 @@ class AssociateModel(BaseModel):
     employment_type: Literal['In-house', 'Freelance', 'Contract'] = 'Freelance'
     is_active: bool = True
     linked_user_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("email_id", mode="before")
     @classmethod
