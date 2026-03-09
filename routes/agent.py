@@ -64,7 +64,9 @@ async def process_query(
 
     except Exception as e:
         logger.error(f"Agent query failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal agent processing error")
+        # Expose the specific exception context (e.g. Groq hallucination details) to the client 
+        # so they don't just see a generic 500 error.
+        raise HTTPException(status_code=500, detail=f"Internal agent processing error: {str(e)}")
 
 from config import config
 
