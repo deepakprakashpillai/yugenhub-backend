@@ -74,9 +74,9 @@ def test_db_session():
 
 @pytest.fixture(scope="function", autouse=True)
 def clean_db(test_db_session):
-    """Drop all collections before each test and re-seed defaults to ensure test isolation."""
-    for collection in sync_db.list_collection_names():
-        sync_db.drop_collection(collection)
+    """Clear all collections before each test and re-seed defaults to ensure test isolation."""
+    for collection_name in sync_db.list_collection_names():
+        sync_db[collection_name].delete_many({})
     seed_default_config()
     yield
 

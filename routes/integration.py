@@ -64,15 +64,17 @@ def _summarise_project(proj: dict) -> dict:
 
 @router.get("/projects")
 async def list_projects(
-    vertical: str = Query(..., description="Vertical slug (required)"),
+    vertical: Optional[str] = None,
     status: Optional[str] = None,
     search: Optional[str] = None,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=500),
     db: ScopedDatabase = Depends(get_integration_db),
 ):
-    """List projects with event summaries for a given vertical. Use /projects/{id} for full details."""
-    query = {"vertical": vertical}
+    """List projects with event summaries. Scope to a vertical if provided, else search globally. Use /projects/{id} for full details."""
+    query = {}
+    if vertical:
+        query["vertical"] = vertical
     if status:
         query["status"] = status
     if search:
@@ -128,20 +130,101 @@ async def get_project_stats(
     return {"total": total, "active": active, "ongoing": ongoing, "this_month": this_month}
 
 
-@router.get("/projects/{project_id}")
+@router.get("/projects/{identifier}")
 async def get_project(
-    project_id: str,
+    identifier: str,
     db: ScopedDatabase = Depends(get_integration_db),
 ):
-    """Fetch a single project by its MongoDB _id."""
-    if not ObjectId.is_valid(project_id):
-        raise HTTPException(status_code=400, detail="Invalid project ID")
+    """Fetch a single project by its MongoDB _id OR its string code (e.g. KN-1234)."""
+    if ObjectId.is_valid(identifier):
+        project = await db.projects.find_one({"_id": ObjectId(identifier)})
+    else:
+        # Assume it's a project code
+        project = await db.projects.find_one({"code": identifier.upper()})
 
-    project = await db.projects.find_one({"_id": ObjectId(project_id)})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     return _clean_id(project)
+
+
+@router.get("/projects/{identifier}/team")
+async def get_project_team(
+    identifier: str,
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """Token-saver: Fetch only event names, dates, and assigned associates."""
+    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": identifier.upper()}
+    project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.start_date": 1, "events.assignments": 1})
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    team_info = []
+    for evt in project.get("events", []):
+        start = evt.get("start_date").isoformat() if isinstance(evt.get("start_date"), datetime) else str(evt.get("start_date") or "TBD")
+        assignments = [{"name": a.get("associate_name", "Unknown"), "role": a.get("role", "Unknown")} for a in evt.get("assignments", [])]
+        team_info.append({
+            "event": evt.get("type", "Unknown Event"),
+            "date": start,
+            "team": assignments
+        })
+        
+    return {"project_code": project.get("code"), "schedule_team": team_info}
+
+@router.get("/projects/{identifier}/schedule")
+async def get_project_schedule(
+    identifier: str,
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """Token-saver: Fetch only event names, dates, and venues."""
+    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": identifier.upper()}
+    project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.start_date": 1, "events.end_date": 1, "events.venue_name": 1, "events.venue_location": 1})
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    schedule = []
+    for evt in project.get("events", []):
+        start = evt.get("start_date").isoformat() if isinstance(evt.get("start_date"), datetime) else str(evt.get("start_date") or "TBD")
+        end = evt.get("end_date").isoformat() if isinstance(evt.get("end_date"), datetime) else str(evt.get("end_date") or "TBD")
+        schedule.append({
+            "event": evt.get("type", "Unknown Event"),
+            "start": start,
+            "end": end,
+            "venue": evt.get("venue_name", "TBD"),
+            "location": evt.get("venue_location", "")
+        })
+        
+    return {"project_code": project.get("code"), "schedule": schedule}
+
+@router.get("/projects/{identifier}/deliverables")
+async def get_pending_deliverables(
+    identifier: str,
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """Token-saver: Fetch only pending deliverables for a project."""
+    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": identifier.upper()}
+    project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.deliverables": 1})
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    pending = []
+    for evt in project.get("events", []):
+        for d in evt.get("deliverables", []):
+            if d.get("status", "").lower() not in ["done", "completed"]:
+                due = d.get("due_date").isoformat() if isinstance(d.get("due_date"), datetime) else str(d.get("due_date") or "TBD")
+                pending.append({
+                    "event": evt.get("type", "Unknown Event"),
+                    "deliverable": d.get("type", "Unknown"),
+                    "status": d.get("status", "Pending"),
+                    "due": due
+                })
+        
+    return {"project_code": project.get("code"), "pending_deliverables": pending}
+
+
 
 
 # ─── Clients ────────────────────────────────────────────────────────────────
@@ -226,6 +309,28 @@ async def get_associate_stats(db: ScopedDatabase = Depends(get_integration_db)):
 
     return {"total": total, "inhouse": inhouse, "freelance": freelance}
 
+
+
+@router.get("/associates/contact")
+async def get_associate_contact(
+    search: str = Query(..., description="Name or partial name to search for"),
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """Token-saver: Fetch only contact info for associates matching a name."""
+    query = {"name": {"$regex": search, "$options": "i"}}
+    cursor = db.associates.find(query, {"name": 1, "email_id": 1, "email": 1, "phone": 1, "primary_role": 1}).limit(5)
+    associates = await cursor.to_list(length=5)
+    
+    contact_list = []
+    for a in associates:
+        contact_list.append({
+            "name": a.get("name"),
+            "role": a.get("primary_role", "Associate"),
+            "phone": a.get("phone", "N/A"),
+            "email": a.get("email_id") or a.get("email") or "N/A"
+        })
+        
+    return {"contacts": contact_list}
 
 # ─── Events (flat view) ────────────────────────────────────────────────────
 

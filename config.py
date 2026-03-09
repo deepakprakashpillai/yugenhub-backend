@@ -39,4 +39,7 @@ class Config:
     # --- n8n Integration Settings ---
     N8N_API_KEY = os.getenv("N8N_API_KEY")
 
+    # --- Agent/LLM Settings ---
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
 config = Config()

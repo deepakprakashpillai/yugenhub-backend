@@ -69,12 +69,12 @@ async def test_list_projects(async_client: AsyncClient):
     assert isinstance(data["data"], list)
 
 
-async def test_list_projects_requires_vertical(async_client: AsyncClient):
-    """List projects without vertical returns 422."""
+async def test_list_projects_optional_vertical(async_client: AsyncClient):
+    """List projects without vertical returns 200 (search globally)."""
     resp = await async_client.get(
         "/api/integration/projects", headers=api_headers(), params=base_params()
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 200
 
 
 async def test_project_stats(async_client: AsyncClient):
