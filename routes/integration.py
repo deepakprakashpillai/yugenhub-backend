@@ -27,26 +27,57 @@ def _clean_list(docs: list) -> list:
     return [_clean_id(d) for d in docs]
 
 
+# ─── Helpers (event summary) ────────────────────────────────────────────────
+
+def _summarise_event(ev: dict) -> dict:
+    """Strip heavy nested data from an event, keep useful summary."""
+    return {
+        "id": ev.get("id"),
+        "type": ev.get("type"),
+        "venue_name": ev.get("venue_name"),
+        "venue_location": ev.get("venue_location"),
+        "start_date": ev.get("start_date"),
+        "end_date": ev.get("end_date"),
+        "assignment_count": len(ev.get("assignments", [])),
+        "deliverable_count": len(ev.get("deliverables", [])),
+    }
+
+
+def _summarise_project(proj: dict) -> dict:
+    """Return a lean project dict with event summaries instead of full events."""
+    return {
+        "_id": str(proj["_id"]) if "_id" in proj else None,
+        "code": proj.get("code"),
+        "vertical": proj.get("vertical"),
+        "client_id": proj.get("client_id"),
+        "client_name": proj.get("metadata", {}).get("client_name"),
+        "status": proj.get("status"),
+        "lead_source": proj.get("lead_source"),
+        "events": [_summarise_event(e) for e in proj.get("events", [])],
+        "assignment_count": len(proj.get("assignments", [])),
+        "created_on": proj.get("created_on"),
+        "updated_on": proj.get("updated_on"),
+    }
+
+
 # ─── Projects ───────────────────────────────────────────────────────────────
 
 @router.get("/projects")
 async def list_projects(
-    vertical: Optional[str] = None,
+    vertical: str = Query(..., description="Vertical slug (required)"),
     status: Optional[str] = None,
     search: Optional[str] = None,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=500),
     db: ScopedDatabase = Depends(get_integration_db),
 ):
-    """List projects with optional filters."""
-    query = {}
-    if vertical:
-        query["vertical"] = vertical
+    """List projects with event summaries for a given vertical. Use /projects/{id} for full details."""
+    query = {"vertical": vertical}
     if status:
         query["status"] = status
     if search:
         query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
+            {"metadata.client_name": {"$regex": search, "$options": "i"}},
             {"code": {"$regex": search, "$options": "i"}},
         ]
 
@@ -59,7 +90,7 @@ async def list_projects(
         "total": total,
         "page": page,
         "limit": limit,
-        "data": _clean_list(projects),
+        "data": [_summarise_project(p) for p in projects],
     }
 
 
@@ -194,6 +225,155 @@ async def get_associate_stats(db: ScopedDatabase = Depends(get_integration_db)):
     freelance = await db.associates.count_documents({"employment_type": "Freelance"})
 
     return {"total": total, "inhouse": inhouse, "freelance": freelance}
+
+
+# ─── Events (flat view) ────────────────────────────────────────────────────
+
+@router.get("/events")
+async def list_events(
+    vertical: Optional[str] = None,
+    from_date: Optional[str] = Query(None, description="ISO date string, e.g. 2026-03-01"),
+    to_date: Optional[str] = Query(None, description="ISO date string, e.g. 2026-04-01"),
+    unassigned_only: bool = Query(False, description="If true, only return events with no assignments"),
+    limit: int = Query(100, ge=1, le=500),
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """Flat listing of events across projects with project context.
+
+    Useful for answering: upcoming events, events near a date, events without team, etc.
+    """
+    # Build the match stage
+    match: dict = {"status": {"$nin": ["completed", "Completed", "archived", "Archived", "cancelled", "Cancelled"]}}
+    if vertical:
+        match["vertical"] = vertical
+
+    pipeline: list = [
+        {"$match": match},
+        {"$unwind": "$events"},
+    ]
+
+    # Date-range filter on the unwound event
+    event_match: dict = {}
+    if from_date:
+        event_match["events.start_date"] = {"$gte": datetime.fromisoformat(from_date)}
+    if to_date:
+        event_match.setdefault("events.start_date", {})["$lt"] = datetime.fromisoformat(to_date)
+    if unassigned_only:
+        event_match["events.assignments"] = {"$size": 0}
+    if event_match:
+        pipeline.append({"$match": event_match})
+
+    pipeline.extend([
+        {"$sort": {"events.start_date": 1}},
+        {"$limit": limit},
+        {"$project": {
+            "_id": 0,
+            "project_id": {"$toString": "$_id"},
+            "project_code": "$code",
+            "client_id": "$client_id",
+            "client_name": "$metadata.client_name",
+            "vertical": "$vertical",
+            "project_status": "$status",
+            "event_id": "$events.id",
+            "event_type": "$events.type",
+            "venue_name": "$events.venue_name",
+            "venue_location": "$events.venue_location",
+            "start_date": "$events.start_date",
+            "end_date": "$events.end_date",
+            "assignment_count": {"$size": {"$ifNull": ["$events.assignments", []]}},
+            "deliverable_count": {"$size": {"$ifNull": ["$events.deliverables", []]}},
+        }},
+    ])
+
+    cursor = db.projects.aggregate(pipeline)
+    events = await cursor.to_list(length=limit)
+    return {"total": len(events), "data": events}
+
+
+# ─── Associate Assignments ──────────────────────────────────────────────────
+
+@router.get("/associates/{associate_id}/assignments")
+async def get_associate_assignments(
+    associate_id: str,
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """All projects & events an associate is assigned to.
+
+    Useful for answering: "What is Ashish working on?", "Which projects involve Ravi?"
+    """
+    if not ObjectId.is_valid(associate_id):
+        raise HTTPException(status_code=400, detail="Invalid associate ID")
+
+    # Check the associate exists and get their name
+    associate = await db.associates.find_one({"_id": ObjectId(associate_id)})
+    if not associate:
+        raise HTTPException(status_code=404, detail="Associate not found")
+
+    # Find projects with this associate in event-level OR project-level assignments
+    query = {
+        "$or": [
+            {"events.assignments.associate_id": associate_id},
+            {"assignments.associate_id": associate_id},
+        ]
+    }
+    cursor = db.projects.find(query)
+    projects = await cursor.to_list(length=None)
+
+    results = []
+    for proj in projects:
+        proj_base = {
+            "project_id": str(proj["_id"]),
+            "project_code": proj.get("code"),
+            "client_name": proj.get("metadata", {}).get("client_name"),
+            "vertical": proj.get("vertical"),
+            "project_status": proj.get("status"),
+        }
+
+        # Event-level assignments
+        for ev in proj.get("events", []):
+            for asn in ev.get("assignments", []):
+                if asn.get("associate_id") == associate_id:
+                    results.append({
+                        **proj_base,
+                        "scope": "event",
+                        "event_type": ev.get("type"),
+                        "start_date": ev.get("start_date"),
+                        "end_date": ev.get("end_date"),
+                        "role": asn.get("role"),
+                    })
+
+        # Project-level assignments
+        for asn in proj.get("assignments", []):
+            if asn.get("associate_id") == associate_id:
+                results.append({
+                    **proj_base,
+                    "scope": "project",
+                    "event_type": None,
+                    "start_date": None,
+                    "end_date": None,
+                    "role": asn.get("role"),
+                })
+
+    return {
+        "associate_id": associate_id,
+        "associate_name": associate.get("name"),
+        "total": len(results),
+        "data": results,
+    }
+
+
+# ─── Verticals ──────────────────────────────────────────────────────────────
+
+@router.get("/verticals")
+async def list_verticals(db: ScopedDatabase = Depends(get_integration_db)):
+    """List all verticals that have at least one project."""
+    pipeline = [
+        {"$group": {"_id": "$vertical", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+    ]
+    cursor = db.projects.aggregate(pipeline)
+    results = await cursor.to_list(length=None)
+    return {"data": [{"vertical": r["_id"], "project_count": r["count"]} for r in results]}
 
 
 # ─── Dashboard ──────────────────────────────────────────────────────────────

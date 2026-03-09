@@ -32,7 +32,7 @@ def base_params():
 
 async def test_no_api_key_returns_401(async_client: AsyncClient):
     """Requests without API key are rejected."""
-    resp = await async_client.get("/api/integration/projects", params=base_params())
+    resp = await async_client.get("/api/integration/projects", params={**base_params(), "vertical": "wedding"})
     assert resp.status_code == 401
 
 
@@ -41,14 +41,14 @@ async def test_wrong_api_key_returns_403(async_client: AsyncClient):
     resp = await async_client.get(
         "/api/integration/projects",
         headers={"X-API-Key": "wrong_key"},
-        params=base_params(),
+        params={**base_params(), "vertical": "wedding"},
     )
     assert resp.status_code == 403
 
 
 async def test_missing_agency_id_returns_422(async_client: AsyncClient):
     """Requests without agency_id are rejected with validation error."""
-    resp = await async_client.get("/api/integration/projects", headers=api_headers())
+    resp = await async_client.get("/api/integration/projects", headers=api_headers(), params={"vertical": "wedding"})
     assert resp.status_code == 422
 
 
@@ -56,15 +56,25 @@ async def test_missing_agency_id_returns_422(async_client: AsyncClient):
 
 
 async def test_list_projects(async_client: AsyncClient):
-    """List projects returns expected shape."""
+    """List projects returns expected shape with summary fields only."""
     resp = await async_client.get(
-        "/api/integration/projects", headers=api_headers(), params=base_params()
+        "/api/integration/projects",
+        headers=api_headers(),
+        params={**base_params(), "vertical": "wedding"},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert "total" in data
     assert "data" in data
     assert isinstance(data["data"], list)
+
+
+async def test_list_projects_requires_vertical(async_client: AsyncClient):
+    """List projects without vertical returns 422."""
+    resp = await async_client.get(
+        "/api/integration/projects", headers=api_headers(), params=base_params()
+    )
+    assert resp.status_code == 422
 
 
 async def test_project_stats(async_client: AsyncClient):
@@ -138,6 +148,80 @@ async def test_associate_stats(async_client: AsyncClient):
     data = resp.json()
     for key in ("total", "inhouse", "freelance"):
         assert key in data
+
+
+# ─── Events ──────────────────────────────────────────────────────────────────
+
+
+async def test_list_events(async_client: AsyncClient):
+    """List events returns expected shape."""
+    resp = await async_client.get(
+        "/api/integration/events", headers=api_headers(), params=base_params()
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "total" in data
+    assert "data" in data
+    assert isinstance(data["data"], list)
+
+
+async def test_list_events_with_filters(async_client: AsyncClient):
+    """List events accepts date and vertical filters."""
+    resp = await async_client.get(
+        "/api/integration/events",
+        headers=api_headers(),
+        params={**base_params(), "vertical": "wedding", "from_date": "2026-01-01", "to_date": "2027-01-01"},
+    )
+    assert resp.status_code == 200
+
+
+async def test_list_events_unassigned(async_client: AsyncClient):
+    """List events with unassigned_only filter."""
+    resp = await async_client.get(
+        "/api/integration/events",
+        headers=api_headers(),
+        params={**base_params(), "unassigned_only": "true"},
+    )
+    assert resp.status_code == 200
+
+
+# ─── Associate Assignments ───────────────────────────────────────────────────
+
+
+async def test_associate_assignments_invalid_id(async_client: AsyncClient):
+    """Invalid associate ID returns 400."""
+    resp = await async_client.get(
+        "/api/integration/associates/not-a-valid-id/assignments",
+        headers=api_headers(),
+        params=base_params(),
+    )
+    assert resp.status_code == 400
+
+
+async def test_associate_assignments_not_found(async_client: AsyncClient):
+    """Non-existent associate returns 404."""
+    from bson import ObjectId
+    fake_id = str(ObjectId())
+    resp = await async_client.get(
+        f"/api/integration/associates/{fake_id}/assignments",
+        headers=api_headers(),
+        params=base_params(),
+    )
+    assert resp.status_code == 404
+
+
+# ─── Verticals ───────────────────────────────────────────────────────────────
+
+
+async def test_list_verticals(async_client: AsyncClient):
+    """List verticals returns expected shape."""
+    resp = await async_client.get(
+        "/api/integration/verticals", headers=api_headers(), params=base_params()
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "data" in data
+    assert isinstance(data["data"], list)
 
 
 # ─── Dashboard ───────────────────────────────────────────────────────────────
