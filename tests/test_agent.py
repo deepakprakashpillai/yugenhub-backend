@@ -15,16 +15,17 @@ def set_n8n_key():
     original_api = config.N8N_API_KEY
     config.N8N_API_KEY = TEST_API_KEY
     
-    # Mock GROQ API key for tests so ChatGroq initialization doesn't fail
-    original_groq = os.environ.get("GROQ_API_KEY")
-    os.environ["GROQ_API_KEY"] = "gsk_test_key"
+    # Mock GEMINI API key for tests so ChatGoogleGenerativeAI initialization doesn't fail
+    original_gemini = os.environ.get("GEMINI_API_KEY")
+    os.environ["GEMINI_API_KEY"] = "dummy_gemini_key"
     
     yield
     config.N8N_API_KEY = original_api
-    if original_groq:
-        os.environ["GROQ_API_KEY"] = original_groq
+    if original_gemini:
+        os.environ["GEMINI_API_KEY"] = original_gemini
     else:
-        del os.environ["GROQ_API_KEY"]
+        if "GEMINI_API_KEY" in os.environ:
+            del os.environ["GEMINI_API_KEY"]
 
 def api_headers():
     return {"X-API-Key": TEST_API_KEY}
@@ -75,11 +76,11 @@ async def test_build_tools_binds_correctly():
     db = ScopedDatabase(raw_db, AGENCY_ID)
     tools = build_tools(db)
     
-    assert len(tools) == 16
+    assert len(tools) == 9
     tool_names = [t.name for t in tools]
     assert "list_projects" in tool_names
-    assert "get_finance_overview" in tool_names
-    assert "get_project_team" in tool_names
+    assert "get_statistics" in tool_names
+    assert "get_project_details" in tool_names
 
 
 # ─── Endpoint Functionality (Mocked LLM) ───────────────────────────────────
@@ -87,7 +88,7 @@ async def test_build_tools_binds_correctly():
 from unittest.mock import patch, AsyncMock
 from langchain_core.messages import AIMessage
 
-@patch("agent.graph.ChatGroq.ainvoke")
+@patch("agent.graph.ChatGoogleGenerativeAI.ainvoke")
 async def test_agent_query_endpoint(mock_ainvoke, async_client: AsyncClient):
     """Test the endpoint returns the final AI message from the graph."""
     
