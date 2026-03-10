@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.runnables import RunnableConfig
 
 from middleware.db_guard import ScopedDatabase
@@ -17,17 +17,30 @@ def build_graph(db: ScopedDatabase):
     tools = build_tools(db)
     tool_node = ToolNode(tools)
 
-    # 2. Configure LLM (Groq instead of OpenAI)
-    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=config.GROQ_API_KEY)
+    # 2. Configure LLM (Gemini instead of Groq)
+    llm = ChatGoogleGenerativeAI(model=config.GEMINI_MODEL_NAME, temperature=0, api_key=config.GEMINI_API_KEY)
     
     # Optional system prompt to guide agent behavior
     # Could be injected as a SystemMessage before compilation or in state,
-    # but binding tools directly to the LLM is standard ReAct.
     llm_with_tools = llm.bind_tools(tools)
+
+    from langchain_core.messages import SystemMessage
 
     # 3. Define the agent node calling the LLM
     async def agent_node(state: AgentState, config: RunnableConfig):
-        response = await llm_with_tools.ainvoke(state["messages"], config)
+        system_prompt = SystemMessage(
+            content=(
+                "You are an operational AI assistant for YugenHub. "
+                "You are strictly designed to fetch and analyze business data regarding projects, clients, events, and team members. "
+                "You must politely refuse any requests that fall outside of this specific operational scope."
+            )
+        )
+        
+        # Prepend the system prompt to the state messages on every invocation
+        # ensuring the LLM is always grounded by this rule
+        messages = [system_prompt] + state["messages"]
+        
+        response = await llm_with_tools.ainvoke(messages, config)
         return {"messages": [response]}
 
     # 4. Construct Graph

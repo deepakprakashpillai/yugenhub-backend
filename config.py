@@ -40,6 +40,8 @@ class Config:
     N8N_API_KEY = os.getenv("N8N_API_KEY")
 
     # --- Agent/LLM Settings ---
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    AGENT_RATE_LIMIT = int(os.getenv("AGENT_RATE_LIMIT", "20"))
 
 config = Config()
