@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from middleware.db_guard import ScopedDatabase
+from middleware.rate_limiter import check_agent_rate_limit
 from routes.deps import get_integration_db
 from logging_config import get_logger
 from agent.graph import build_graph
@@ -16,20 +17,24 @@ class QueryRequest(BaseModel):
 @router.post("/query")
 async def process_query(
     request: QueryRequest,
+    req: Request,
     db: ScopedDatabase = Depends(get_integration_db),
+    _=Depends(check_agent_rate_limit),
 ):
     """
     Process a natural language query using the LangGraph ReAct agent.
     The agent determines which tools to invoke based on existing integration endpoints.
     Requires same API key auth and agency tracking as integration endpoints.
     """
+    from langgraph.errors import GraphRecursionError
     try:
         # Build graph bound to agency scope
         graph = build_graph(db)
         
-        # Invoke agent
+        # Invoke agent with a strict recursion limit to prevent infinite loops
+        config = {"recursion_limit": 5}
         inputs = {"messages": [HumanMessage(content=request.query)]}
-        result = await graph.ainvoke(inputs)
+        result = await graph.ainvoke(inputs, config)
         
         # Extract the final AIMessage content
         final_message = result["messages"][-1].content
@@ -62,6 +67,13 @@ async def process_query(
             "usage": {"total_tokens": total_tokens} if total_tokens > 0 else None
         }
 
+    except GraphRecursionError:
+        logger.warning(f"Agent hit recursion limit processing query: {request.query}")
+        return {
+            "response": "I ran out of steps attempting to answer that question. Too many tool calls were required or I got caught in a loop. Please try a simpler or more specific query.",
+            "steps": [],
+            "usage": None
+        }
     except Exception as e:
         logger.error(f"Agent query failed: {str(e)}", exc_info=True)
         # Expose the specific exception context (e.g. Groq hallucination details) to the client 
@@ -353,14 +365,15 @@ async def agent_playground():
                 }
 
                 const data = await response.json();
-                addMessage(data.response, 'ai');
+                
+                let aiText = data.response;
+                if (data.usage && data.usage.total_tokens) {
+                    aiText += `\n\n[Tokens Used: ${data.usage.total_tokens}]`;
+                }
+                
+                addMessage(aiText, 'ai');
                 renderTrace(query, data.steps);
                 
-                if (data.usage && data.usage.total_tokens) {
-                    if(document.getElementById('tokenInfo')) {
-                        document.getElementById('tokenInfo').textContent = `Tokens used: ${data.usage.total_tokens}`;
-                    }
-                }
             } catch (err) {
                 addMessage(`Error: ${err.message}`, 'ai');
             } finally {

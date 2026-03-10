@@ -74,7 +74,8 @@ async def list_projects(
     """List projects with event summaries. Scope to a vertical if provided, else search globally. Use /projects/{id} for full details."""
     query = {}
     if vertical:
-        query["vertical"] = vertical
+        # Agent might pass 'pluto' or 'Pluto', make it case-insensitive without strict anchoring
+        query["vertical"] = {"$regex": vertical, "$options": "i"}
     if status:
         query["status"] = status
     if search:
@@ -104,7 +105,7 @@ async def get_project_stats(
     """Project overview stats: total, active, ongoing, this month."""
     base_query = {}
     if vertical:
-        base_query["vertical"] = vertical
+        base_query["vertical"] = {"$regex": f"^{vertical}$", "$options": "i"}
 
     total = await db.projects.count_documents(base_query)
 
@@ -240,7 +241,7 @@ async def list_clients(
     """List clients with optional filters."""
     query = {}
     if client_type:
-        query["type"] = client_type
+        query["type"] = {"$regex": f"^{client_type}$", "$options": "i"}
     if search:
         query["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
@@ -283,9 +284,9 @@ async def list_associates(
     """List associates with optional filters."""
     query = {}
     if role:
-        query["primary_role"] = role
+        query["primary_role"] = {"$regex": f"^{role}$", "$options": "i"}
     if employment_type:
-        query["employment_type"] = employment_type
+        query["employment_type"] = {"$regex": f"^{employment_type}$", "$options": "i"}
     if search:
         query["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
@@ -350,7 +351,7 @@ async def list_events(
     # Build the match stage
     match: dict = {"status": {"$nin": ["completed", "Completed", "archived", "Archived", "cancelled", "Cancelled"]}}
     if vertical:
-        match["vertical"] = vertical
+        match["vertical"] = {"$regex": f"^{vertical}$", "$options": "i"}
 
     pipeline: list = [
         {"$match": match},

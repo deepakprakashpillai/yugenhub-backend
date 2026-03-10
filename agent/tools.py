@@ -11,6 +11,7 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
     The LLM never queries the database directly; it only invokes these 
     predefined, strictly typed tools.
     """
+    from typing import Literal
 
     @tool
     async def list_projects(
@@ -21,30 +22,35 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
         limit: int = 50,
     ) -> dict[str, Any]:
         """
-        List projects. You can scope to a vertical or search globally by client name or code.
-        Use this BEFORE returning if you only know a client's name. Example: search="Vihaan Patel"
+        List projects. 
+        Use `vertical` if the user specifies a category/vertical name (e.g. "Wedding", "Real Estate", or "Pluto").
+        Use `search` if the user specifies a specific client name or project code.
+        If unsure whether a term is a vertical or client name, try `vertical` first or call `list_verticals`.
         """
         return await integration.list_projects(
-            vertical=vertical,
-            status=status,
-            search=search,
-            page=page,
-            limit=limit,
-            db=db,
+            vertical=vertical, status=status, search=search, page=page, limit=limit, db=db
         )
 
     @tool
-    async def get_project_stats(vertical: Optional[str] = None) -> dict[str, Any]:
-        """Get high-level statistics about projects: total, active, ongoing, and this month."""
-        return await integration.get_project_stats(vertical=vertical, db=db)
-
-    @tool
-    async def get_project_by_strict_id_or_code(project_id_or_code: str) -> dict[str, Any]:
+    async def get_project_details(
+        id_or_code: str,
+        view: Literal["full", "team", "schedule", "deliverables"] = "full"
+    ) -> dict[str, Any]:
         """
-        Fetch full details for a single project strictly by its MongoDB _id OR its exact string code (e.g. 'KN-39829').
-        DO NOT pass a client's name here. If you only know a client's name, use `list_projects(search="Name")` first to find the project ID or code.
+        Fetch details for a project by exact _id or code (e.g. 'KN-39829'). 
+        view="full": All details.
+        view="team": Event names, dates, and assigned associates.
+        view="schedule": Event names, dates, and venues.
+        view="deliverables": Incomplete deliverables.
         """
-        return await integration.get_project(identifier=project_id_or_code, db=db)
+        if view == "team":
+            return await integration.get_project_team(identifier=id_or_code, db=db)
+        elif view == "schedule":
+            return await integration.get_project_schedule(identifier=id_or_code, db=db)
+        elif view == "deliverables":
+            return await integration.get_pending_deliverables(identifier=id_or_code, db=db)
+        else:
+            return await integration.get_project(identifier=id_or_code, db=db)
 
     @tool
     async def list_clients(
@@ -53,15 +59,10 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List clients. Use 'search' to find by name or phone."""
+        """List clients. Use search to find by exact name or phone."""
         return await integration.list_clients(
             client_type=type, search=search, page=page, limit=limit, db=db
         )
-
-    @tool
-    async def get_client_stats() -> dict[str, Any]:
-        """Client overview statistics."""
-        return await integration.get_client_stats(db=db)
 
     @tool
     async def list_associates(
@@ -71,7 +72,7 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List associates (team members). Use 'search' to find by name or phone."""
+        """List associates (team members). Use search by name or phone."""
         return await integration.list_associates(
             role=role,
             employment_type=employment_type,
@@ -82,9 +83,17 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
         )
 
     @tool
-    async def get_associate_stats() -> dict[str, Any]:
-        """Associate overview stats (total, inhouse, freelance)."""
-        return await integration.get_associate_stats(db=db)
+    async def get_associate_contact(search: str) -> dict[str, Any]:
+        """Fast lookup for an associate's contact info (email, phone) matching a name."""
+        return await integration.get_associate_contact(search=search, db=db)
+
+    @tool
+    async def get_associate_assignments(associate_id: str) -> dict[str, Any]:
+        """
+        Find projects & events an associate is assigned to by their exact _id.
+        Use list_associates to find the _id first.
+        """
+        return await integration.get_associate_assignments(associate_id=associate_id, db=db)
 
     @tool
     async def list_events(
@@ -94,11 +103,7 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
         unassigned_only: bool = False,
         limit: int = 100,
     ) -> dict[str, Any]:
-        """
-        Flat listing of events across all projects.
-        Useful for queries like 'upcoming events', 'events next week', or 'unassigned events'.
-        Dates must be ISO strings (e.g., '2026-03-01').
-        """
+        """Flat list of events across projects. Dates must be ISO strings."""
         return await integration.list_events(
             vertical=vertical,
             from_date=from_date,
@@ -109,79 +114,42 @@ def build_tools(db: ScopedDatabase) -> list[BaseTool]:
         )
 
     @tool
-    async def get_associate_assignments(associate_id: str) -> dict[str, Any]:
-        """
-        Find all projects & events a specific associate is assigned to.
-        Requires the associate's exact MongoDB _id.
-        IMPORTANT: If the user only provides an associate's name, you MUST use the `list_associates` tool first with the `search` parameter to find their `_id`. DO NOT guess the `_id`.
-        """
-        return await integration.get_associate_assignments(
-            associate_id=associate_id, db=db
-        )
-
-    @tool
     async def list_verticals() -> dict[str, Any]:
-        """Get a list of all active verticals and their project counts."""
+        """Get active verticals and their project counts."""
         return await integration.list_verticals(db=db)
 
     @tool
-    async def get_dashboard_stats() -> dict[str, Any]:
-        """High-level system stats: active projects, total clients, total associates, pending tasks."""
-        return await integration.get_dashboard_stats(db=db)
-
-    @tool
-    async def get_finance_overview() -> dict[str, Any]:
-        """Finance summary: total income, expenses, net profit, and outstanding receivables."""
-        return await integration.get_finance_overview(db=db)
-
-    @tool
-    async def get_project_team(project_id_or_code: str) -> dict[str, Any]:
+    async def get_statistics(
+        module: Literal["dashboard", "finance", "projects", "clients", "associates"],
+        vertical: Optional[str] = None
+    ) -> dict[str, Any]:
         """
-        Token-saver: Fast, lightweight way to fetch only event names, dates, and assigned associates for a project. 
-        Always prefer this over `get_project` when asked "Who is assigned to..." or "What is the team for...".
+        Get aggregate stats. module="dashboard": overall system stats. 
+        module="finance": totals and net profit.
+        module="projects": active/ongoing breakdown (can optionally filter by vertical).
         """
-        return await integration.get_project_team(identifier=project_id_or_code, db=db)
-
-    @tool
-    async def get_project_schedule(project_id_or_code: str) -> dict[str, Any]:
-        """
-        Token-saver: Fast, lightweight way to fetch only event names, dates, and venues for a project.
-        Always prefer this over `get_project` when asked about schedules.
-        """
-        return await integration.get_project_schedule(identifier=project_id_or_code, db=db)
-
-    @tool
-    async def get_pending_deliverables(project_id_or_code: str) -> dict[str, Any]:
-        """
-        Token-saver: Fast, lightweight way to fetch only the pending (incomplete) deliverables for a project.
-        Always prefer this over `get_project` when asked about remaining deliverables or what is left to do.
-        """
-        return await integration.get_pending_deliverables(identifier=project_id_or_code, db=db)
-        
-    @tool
-    async def get_associate_contact(search: str) -> dict[str, Any]:
-        """
-        Token-saver: Fast, lightweight way to fetch only contact info (name, email, phone, role) for associates matching a name.
-        Always prefer this over `list_associates` when simply asked for contact details.
-        """
-        return await integration.get_associate_contact(search=search, db=db)
+        if module == "dashboard":
+            return await integration.get_dashboard_stats(db=db)
+        elif module == "finance":
+            return await integration.get_finance_overview(db=db)
+        elif module == "projects":
+            return await integration.get_project_stats(vertical=vertical, db=db)
+        elif module == "clients":
+            return await integration.get_client_stats(db=db)
+        elif module == "associates":
+            return await integration.get_associate_stats(db=db)
+        else:
+            return {"error": "Invalid module."}
 
     # Return the full suite of bound tools
     return [
         list_projects,
-        get_project_stats,
-        get_project_by_strict_id_or_code,
+        get_project_details,
         list_clients,
-        get_client_stats,
         list_associates,
-        get_associate_stats,
         get_associate_contact,
-        list_events,
         get_associate_assignments,
+        list_events,
         list_verticals,
-        get_dashboard_stats,
-        get_finance_overview,
-        get_project_team,
-        get_project_schedule,
-        get_pending_deliverables,
+        get_statistics,
     ]
