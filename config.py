@@ -43,5 +43,6 @@ class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
     AGENT_RATE_LIMIT = int(os.getenv("AGENT_RATE_LIMIT", "20"))
+    AGENT_RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "15"))
 
 config = Config()

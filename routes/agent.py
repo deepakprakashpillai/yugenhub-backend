@@ -31,10 +31,10 @@ async def process_query(
         # Build graph bound to agency scope
         graph = build_graph(db)
         
-        # Invoke agent with a strict recursion limit to prevent infinite loops
-        config = {"recursion_limit": 5}
+        # Invoke agent with a configurable recursion limit to prevent infinite loops while allowing enough steps
+        run_config = {"recursion_limit": config.AGENT_RECURSION_LIMIT}
         inputs = {"messages": [HumanMessage(content=request.query)]}
-        result = await graph.ainvoke(inputs, config)
+        result = await graph.ainvoke(inputs, run_config)
         
         # Extract the final AIMessage content
         final_message = result["messages"][-1].content
