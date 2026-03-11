@@ -16,13 +16,16 @@ def set_n8n_key():
     config.N8N_API_KEY = TEST_API_KEY
     
     # Mock GEMINI API key for tests so ChatGoogleGenerativeAI initialization doesn't fail
-    original_gemini = os.environ.get("GEMINI_API_KEY")
+    original_gemini_env = os.environ.get("GEMINI_API_KEY")
     os.environ["GEMINI_API_KEY"] = "dummy_gemini_key"
+    original_gemini_config = config.GEMINI_API_KEY
+    config.GEMINI_API_KEY = "dummy_gemini_key"
     
     yield
     config.N8N_API_KEY = original_api
-    if original_gemini:
-        os.environ["GEMINI_API_KEY"] = original_gemini
+    config.GEMINI_API_KEY = original_gemini_config
+    if original_gemini_env:
+        os.environ["GEMINI_API_KEY"] = original_gemini_env
     else:
         if "GEMINI_API_KEY" in os.environ:
             del os.environ["GEMINI_API_KEY"]
