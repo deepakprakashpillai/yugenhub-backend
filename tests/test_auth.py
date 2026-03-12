@@ -18,3 +18,34 @@ async def test_dev_login_fails_in_production(async_client: AsyncClient):
 async def test_auth_token_format(auth_headers: dict):
     assert "Authorization" in auth_headers
     assert auth_headers["Authorization"].startswith("Bearer ")
+
+async def test_user_discovery_by_email(async_client: AsyncClient):
+    # Seed the user directly for this test
+    from database import users_collection
+    user_data = {
+        "id": "test_admin_id",
+        "email": "admin@test.com",
+        "name": "Admin User",
+        "agency_id": "default_agency",
+        "role": "admin"
+    }
+    await users_collection.insert_one(user_data)
+    
+    response = await async_client.get("/api/auth/discover?email=admin@test.com")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["found"] is True
+    assert data["agency_id"] == "default_agency"
+    
+    # Cleanup
+    await users_collection.delete_one({"id": "test_admin_id"})
+
+async def test_user_discovery_not_found(async_client: AsyncClient):
+    response = await async_client.get("/api/auth/discover?email=nonexistent@test.com")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["found"] is False
+
+async def test_user_discovery_missing_params(async_client: AsyncClient):
+    response = await async_client.get("/api/auth/discover")
+    assert response.status_code == 400
