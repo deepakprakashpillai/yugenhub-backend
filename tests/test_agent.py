@@ -109,6 +109,33 @@ async def test_agent_query_endpoint(mock_ainvoke, async_client: AsyncClient):
     data = resp.json()
     assert "response" in data
     assert data["response"] == "You have 5 active projects."
+    # By default steps should NOT be included
+    assert "steps" not in data
+
+@patch("agent.graph.ChatGoogleGenerativeAI.ainvoke")
+async def test_agent_query_with_steps(mock_ainvoke, async_client: AsyncClient):
+    """Test the endpoint returns steps when include_steps is True."""
+    
+    # Mock the LLM's ainvoke method to return a valid AIMessage
+    mock_ainvoke.return_value = AIMessage(
+        content="Final answer.",
+        tool_calls=[{"name": "list_projects", "args": {}, "id": "call_123", "type": "tool_call"}]
+    )
+    
+    payload = base_payload().copy()
+    payload["include_steps"] = True
+    
+    resp = await async_client.post(
+        "/api/agent/query",
+        headers=api_headers(),
+        params=base_params(),
+        json=payload
+    )
+    
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "steps" in data
+    assert len(data["steps"]) > 0
 
 # ─── UI Playground ─────────────────────────────────────────────────────────
 
