@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from logging_config import get_logger
 import os
 from config import config
+from typing import Optional
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 logger = get_logger("auth")
@@ -101,6 +102,34 @@ async def google_login(token_data: dict = Body(...)):
     except Exception as e:
         logger.error(f"Authentication failed with unexpected error: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail="Authentication failed. Please try again.")
+
+@router.get("/discover")
+async def discover_user(
+    email: Optional[str] = None,
+    phone: Optional[str] = None
+):
+    """
+    Public discovery endpoint to find a user's agency_id.
+    Useful for checking if a user exists before starting OAuth flow.
+    """
+    if not email and not phone:
+        raise HTTPException(status_code=400, detail="Either email or phone is required")
+    
+    query = {}
+    if email:
+        query["email"] = email
+    if phone:
+        query["phone"] = phone
+        
+    user = await users_collection.find_one(query)
+    
+    if user:
+        return {
+            "found": True,
+            "agency_id": user.get("agency_id")
+        }
+    
+    return {"found": False}
 
 
 # ============ DEV-ONLY ENDPOINTS ============
