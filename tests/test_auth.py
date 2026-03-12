@@ -49,3 +49,23 @@ async def test_user_discovery_not_found(async_client: AsyncClient):
 async def test_user_discovery_missing_params(async_client: AsyncClient):
     response = await async_client.get("/api/auth/discover")
     assert response.status_code == 400
+
+async def test_user_discovery_case_insensitive(async_client: AsyncClient):
+    # Seed user with specific case
+    from database import users_collection
+    user_data = {
+        "id": "case_test_id",
+        "email": "MixedCase@Test.com",
+        "name": "Case User",
+        "agency_id": "case_agency",
+        "role": "admin"
+    }
+    await users_collection.insert_one(user_data)
+    
+    # Search with lowercase
+    response = await async_client.get("/api/auth/discover?email=mixedcase@test.com")
+    assert response.status_code == 200
+    assert response.json()["found"] is True
+    
+    # Cleanup
+    await users_collection.delete_one({"id": "case_test_id"})

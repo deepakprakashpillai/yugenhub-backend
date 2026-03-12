@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Body, HTTPException, Depends
+import re
 from google.oauth2 import id_token
 from google.auth.transport import requests
 from database import users_collection 
@@ -115,13 +116,14 @@ async def discover_user(
     if not email and not phone:
         raise HTTPException(status_code=400, detail="Either email or phone is required")
     
-    query = {}
+    query_parts = []
     if email:
-        query["email"] = email
+        # Case-insensitive exact match for email
+        query_parts.append({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
     if phone:
-        query["phone"] = phone
+        query_parts.append({"phone": phone})
         
-    user = await users_collection.find_one(query)
+    user = await users_collection.find_one({"$or": query_parts})
     
     if user:
         return {
