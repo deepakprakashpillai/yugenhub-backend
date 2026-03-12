@@ -121,7 +121,17 @@ async def discover_user(
         # Case-insensitive exact match for email
         query_parts.append({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
     if phone:
-        query_parts.append({"phone": phone})
+        # Clean phone: only digits, then take last 10 to ignore country code
+        digits = "".join(filter(str.isdigit, phone))
+        if len(digits) >= 10:
+            last_10 = digits[-10:]
+            # Build regex to match these 10 digits at the end, allowing for separators like spaces/dashes
+            # Example: ".*9[^0-9]*8[^0-9]*...0$"
+            phone_pattern = ".*" + "[^0-9]*".join(list(last_10)) + "$"
+            query_parts.append({"phone": {"$regex": phone_pattern}})
+        else:
+            # Fallback for shorter numbers
+            query_parts.append({"phone": phone})
         
     user = await users_collection.find_one({"$or": query_parts})
     

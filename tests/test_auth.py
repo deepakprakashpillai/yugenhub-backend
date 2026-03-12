@@ -69,3 +69,34 @@ async def test_user_discovery_case_insensitive(async_client: AsyncClient):
     
     # Cleanup
     await users_collection.delete_one({"id": "case_test_id"})
+
+async def test_user_discovery_robust_phone(async_client: AsyncClient):
+    # Seed user with formatted phone and country code
+    from database import users_collection
+    user_data = {
+        "id": "phone_test_id",
+        "email": "phone@test.com",
+        "name": "Phone User",
+        "phone": "+91 98765-43210",
+        "agency_id": "phone_agency",
+        "role": "admin"
+    }
+    await users_collection.insert_one(user_data)
+    
+    # Test 1: Exact match with input same as DB
+    resp = await async_client.get("/api/auth/discover?phone=%2B91+98765-43210")
+    assert resp.status_code == 200
+    assert resp.json()["found"] is True
+    
+    # Test 2: Match with different formatting
+    resp = await async_client.get("/api/auth/discover?phone=9876543210")
+    assert resp.status_code == 200
+    assert resp.json()["found"] is True
+
+    # Test 3: Match with different country code prefix
+    resp = await async_client.get("/api/auth/discover?phone=%2B19876543210")
+    assert resp.status_code == 200
+    assert resp.json()["found"] is True
+    
+    # Cleanup
+    await users_collection.delete_one({"id": "phone_test_id"})
