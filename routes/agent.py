@@ -7,12 +7,14 @@ from middleware.rate_limiter import check_agent_rate_limit
 from routes.deps import get_integration_db
 from logging_config import get_logger
 from agent.graph import build_graph
+from config import config
 
 router = APIRouter(prefix="/api/agent", tags=["AI Agent"])
 logger = get_logger("agent")
 
 class QueryRequest(BaseModel):
     query: str
+    include_steps: bool = False
 
 @router.post("/query")
 async def process_query(
@@ -61,26 +63,32 @@ async def process_query(
                     "result": msg.content
                 })
         
-        return {
+        response_data = {
             "response": final_message,
-            "steps": execution_steps,
-            "usage": {"total_tokens": total_tokens} if total_tokens > 0 else None
         }
+        
+        if request.include_steps:
+            response_data["steps"] = execution_steps
+            
+        if total_tokens > 0:
+            response_data["usage"] = {"total_tokens": total_tokens}
+            
+        return response_data
 
     except GraphRecursionError:
         logger.warning(f"Agent hit recursion limit processing query: {request.query}")
-        return {
+        response_data = {
             "response": "I ran out of steps attempting to answer that question. Too many tool calls were required or I got caught in a loop. Please try a simpler or more specific query.",
-            "steps": [],
-            "usage": None
         }
+        if request.include_steps:
+            response_data["steps"] = []
+        return response_data
     except Exception as e:
         logger.error(f"Agent query failed: {str(e)}", exc_info=True)
         # Expose the specific exception context (e.g. Groq hallucination details) to the client 
         # so they don't just see a generic 500 error.
         raise HTTPException(status_code=500, detail=f"Internal agent processing error: {str(e)}")
 
-from config import config
 
 @router.get("/playground", response_class=HTMLResponse)
 async def agent_playground():
@@ -354,7 +362,8 @@ async def agent_playground():
                         'X-API-Key': apiKey
                     },
                     body: JSON.stringify({
-                        query: query
+                        query: query,
+                        include_steps: true
                     })
                 });
 
