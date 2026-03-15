@@ -15,22 +15,25 @@ from config import config
 
 # ─── Module-Level Singletons (created once on import) ──────────────────────
 
-# LLM instance — reused across all requests (stateless, thread-safe)
-_llm = ChatGoogleGenerativeAI(
-    model=config.GEMINI_MODEL_NAME,
-    temperature=0,
-    api_key=config.GEMINI_API_KEY,
-)
-
-# Tool definitions (schemas only, no DB binding) — created once on import.
-# These define the function signatures/docstrings the LLM sees.
-_tool_defs = get_tool_defs()
-
-# LLM with tools bound — created once. Tool schemas never change between requests.
-_llm_with_tools = _llm.bind_tools(_tool_defs)
-
-# Compiled graph — created once on import. Topology never changes.
+_llm = None
+_tool_defs = None
+_llm_with_tools = None
 _compiled_graph = None
+
+def get_llm():
+    """Lazy initialization of the LLM to prevent crash on import in CI environments where no API key exists."""
+    global _llm, _tool_defs, _llm_with_tools
+    if _llm is None:
+        _llm = ChatGoogleGenerativeAI(
+            model=config.GEMINI_MODEL_NAME,
+            temperature=0,
+            api_key=config.GEMINI_API_KEY or "dummy_key_for_ci",
+        )
+        # Tool definitions (schemas only, no DB binding)
+        _tool_defs = get_tool_defs()
+        # LLM with tools bound — created once. Tool schemas never change between requests.
+        _llm_with_tools = _llm.bind_tools(_tool_defs)
+    return _llm_with_tools
 
 # Agency config cache with bounded size and automatic TTL eviction
 CONFIG_CACHE: TTLCache = TTLCache(maxsize=200, ttl=4 * 3600)
@@ -137,7 +140,8 @@ def _build_compiled_graph():
 
 async def _agent_node(state: AgentState, config: RunnableConfig):
     """Agent node: calls LLM with current messages. System prompt is already in state."""
-    response = await _llm_with_tools.ainvoke(state["messages"], config)
+    llm_with_tools = get_llm()
+    response = await llm_with_tools.ainvoke(state["messages"], config)
     return {"messages": [response]}
 
 
