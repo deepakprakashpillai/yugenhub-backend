@@ -1,16 +1,19 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Body, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage
 from middleware.db_guard import ScopedDatabase
 from middleware.rate_limiter import check_agent_rate_limit
 from routes.deps import get_integration_db
 from logging_config import get_logger
-from agent.graph import build_graph
+from agent.graph import run_agent
 from config import config
 
 router = APIRouter(prefix="/api/agent", tags=["AI Agent"])
 logger = get_logger("agent")
+
+# Request timeout for agent queries (seconds)
+AGENT_TIMEOUT = 90
 
 class QueryRequest(BaseModel):
     query: str
@@ -30,18 +33,16 @@ async def process_query(
     """
     from langgraph.errors import GraphRecursionError
     try:
-        # Build graph bound to agency scope
-        graph = build_graph(db)
-        
-        # Invoke agent with a configurable recursion limit to prevent infinite loops while allowing enough steps
-        run_config = {"recursion_limit": config.AGENT_RECURSION_LIMIT}
-        inputs = {"messages": [HumanMessage(content=request.query)]}
-        result = await graph.ainvoke(inputs, run_config)
+        # Run the agent with timeout protection
+        result = await asyncio.wait_for(
+            run_agent(query=request.query, db=db, recursion_limit=config.AGENT_RECURSION_LIMIT),
+            timeout=AGENT_TIMEOUT,
+        )
         
         # Extract the final AIMessage content
         final_message = result["messages"][-1].content
         
-        # Extract execution steps (tool calls and results) and track total tokens matched from AIMessages
+        # Extract execution steps (tool calls and results) and track total tokens from AIMessages
         execution_steps = []
         total_tokens = 0
         
@@ -75,6 +76,12 @@ async def process_query(
             
         return response_data
 
+    except asyncio.TimeoutError:
+        logger.warning(f"Agent timed out after {AGENT_TIMEOUT}s processing query: {request.query}")
+        return {
+            "response": f"The query took too long to process (>{AGENT_TIMEOUT}s). Please try a simpler or more specific question.",
+            **({"steps": []} if request.include_steps else {}),
+        }
     except GraphRecursionError:
         logger.warning(f"Agent hit recursion limit processing query: {request.query}")
         response_data = {
@@ -85,8 +92,6 @@ async def process_query(
         return response_data
     except Exception as e:
         logger.error(f"Agent query failed: {str(e)}", exc_info=True)
-        # Expose the specific exception context (e.g. Groq hallucination details) to the client 
-        # so they don't just see a generic 500 error.
         raise HTTPException(status_code=500, detail=f"Internal agent processing error: {str(e)}")
 
 

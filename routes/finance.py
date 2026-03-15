@@ -110,7 +110,7 @@ async def get_transactions(
     type: Optional[str] = None,
     category: Optional[str] = None,
     page: int = 1,
-    limit: int = 50,
+    limit: int = Query(50, le=1000),
     db: ScopedDatabase = Depends(get_db)
 ):
     query = {}
@@ -159,7 +159,7 @@ async def create_transaction(transaction: TransactionModel, db: ScopedDatabase =
 @router.get("/invoices", response_model=List[InvoiceModel])
 async def get_invoices(
     project_id: Optional[str] = None,
-    limit: int = 100,
+    limit: int = Query(100, le=500),
     db: ScopedDatabase = Depends(get_db)
 ):
     query = {}
@@ -255,7 +255,7 @@ async def get_overview(db: ScopedDatabase = Depends(get_db)):
         {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}}
     ]
     cursor = db.transactions.aggregate(pipeline)
-    totals = {doc["_id"]: doc["total"] for doc in await cursor.to_list(length=None)}
+    totals = {doc["_id"]: doc["total"] for doc in await cursor.to_list(length=100)}
     
     income = totals.get("income", 0.0)
     expenses = totals.get("expense", 0.0)

@@ -1,5 +1,6 @@
 # routes/client.py
 from fastapi import APIRouter, Body, HTTPException, status, Query
+import re
 from typing import get_args
 from models.client import ClientModel
 from routes.deps import get_current_user, get_db, require_role
@@ -22,7 +23,7 @@ async def get_clients(
     client_type: str = Query(None, alias="type", description="Filter by Lead, Active, etc."),
     sort: str = Query(None, description="Sort options: projects_desc, projects_asc, newest, oldest"),
     page: int = Query(1, ge=1, description="Page number"),
-    limit: int = Query(10, ge=1, le=50000, description="Items per page"),
+    limit: int = Query(10, ge=1, le=1000, description="Items per page"),
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
 ):
@@ -31,10 +32,11 @@ async def get_clients(
 
     # 1. Search Logic
     if search:
+        safe_search = re.escape(search)
         query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
-            {"location": {"$regex": search, "$options": "i"}}
+            {"name": {"$regex": safe_search, "$options": "i"}},
+            {"phone": {"$regex": safe_search, "$options": "i"}},
+            {"location": {"$regex": safe_search, "$options": "i"}}
         ]
 
     # 2. Filter Logic
@@ -92,7 +94,7 @@ async def get_client_stats(current_user: UserModel = Depends(get_current_user), 
 
     # 3. New This Month
     now = datetime.now(timezone.utc)
-    start_of_month = datetime(now.year, now.month, 1)
+    start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     
     month_query = base_query.copy()
     month_query["created_at"] = {"$gte": start_of_month} 
