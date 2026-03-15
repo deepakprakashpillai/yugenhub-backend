@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, HTTPException, Depends, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
+import re
 # REMOVED raw collection imports
 from models.task import TaskModel, TaskHistoryModel
 from models.notification import NotificationModel
@@ -90,7 +91,7 @@ async def list_tasks_grouped(
         match_stage["assigned_to"] = assigned_to
 
     if search:
-        match_stage["title"] = {"$regex": search, "$options": "i"}
+        match_stage["title"] = {"$regex": re.escape(search), "$options": "i"}
     if project_id:
         match_stage["project_id"] = project_id
     elif has_project is True:
@@ -314,7 +315,7 @@ async def list_tasks(
     completed: Optional[bool] = None,
     has_project: Optional[bool] = None,
     page: int = Query(1, ge=1),
-    limit: int = Query(100, le=50000),
+    limit: int = Query(100, le=1000),
     search: Optional[str] = None,
     sort_by: Optional[str] = Query("created_at", description="Field to sort by: created_at, due_date, priority"),
     order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
@@ -347,7 +348,7 @@ async def list_tasks(
         match_stage["assigned_to"] = assigned_to
 
     if search:
-        match_stage["title"] = {"$regex": search, "$options": "i"}
+        match_stage["title"] = {"$regex": re.escape(search), "$options": "i"}
     if project_id:
         match_stage["project_id"] = project_id
     elif has_project is True:

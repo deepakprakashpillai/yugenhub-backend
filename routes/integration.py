@@ -2,6 +2,7 @@
 # Read-only API endpoints for n8n and external integrations.
 # Authenticated via API key (X-API-Key header), scoped per agency_id query param.
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from datetime import datetime, timezone
@@ -27,6 +28,82 @@ def _clean_list(docs: list) -> list:
     return [_clean_id(d) for d in docs]
 
 
+def _build_search_or(search: str) -> list[dict]:
+    """Build the $or conditions for searching across project metadata fields.
+    Centralised to avoid duplicating these 8 conditions in multiple places."""
+    safe = re.escape(search)
+    return [
+        {"metadata.client_name": {"$regex": safe, "$options": "i"}},
+        {"code": {"$regex": safe, "$options": "i"}},
+        {"metadata.groom_name": {"$regex": safe, "$options": "i"}},
+        {"metadata.bride_name": {"$regex": safe, "$options": "i"}},
+        {"metadata.child_name": {"$regex": safe, "$options": "i"}},
+        {"metadata.event_name": {"$regex": safe, "$options": "i"}},
+        {"metadata.company_name": {"$regex": safe, "$options": "i"}},
+        {"events.type": {"$regex": safe, "$options": "i"}},
+    ]
+
+
+def _normalise_code(raw: str) -> str:
+    """Best-effort normalisation of project codes.
+
+    Users (and the LLM) often type codes with spaces or missing dashes:
+      'KN 2026 1234'  -> 'KN-2026-1234'
+      'kn-2026-0001'  -> 'KN-2026-0001'
+      'KN20260001'    -> 'KN-2026-0001'  (continuous 10-char form)
+
+    If the input already contains dashes it is just uppercased.
+    """
+    s = raw.strip().upper()
+    if "-" in s:
+        return s
+    # Space-separated: 'KN 2026 1234'
+    parts = s.split()
+    if len(parts) == 3:
+        prefix, year, seq = parts
+        return f"{prefix}-{year}-{seq.zfill(4)}"
+    # Continuous form: 'KN20260001' (2 letter + 4 year + 4 seq = 10)
+    m = re.match(r"^([A-Z]{2})(\d{4})(\d{4})$", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return s  # fallback: return as-is uppercased
+
+
+def _resolve_title(proj: dict, agency_config: Optional[dict]) -> str:
+    """Resolve a human-readable project title from vertical title_template + metadata.
+
+    Example: For a 'knots' vertical with template '{groom_name} & {bride_name}'
+    and metadata {'groom_name': 'Aswin', 'bride_name': 'Priya'}, returns 'Aswin & Priya'.
+    Falls back to client_name or project code.
+
+    Accepts a pre-fetched agency_config dict to avoid N+1 DB queries when resolving
+    titles for lists of projects.
+    """
+    metadata = proj.get("metadata", {})
+    fallback = metadata.get("client_name") or proj.get("code", "Project")
+
+    vertical_id = proj.get("vertical")
+    if not vertical_id or not agency_config:
+        return fallback
+
+    v_id = vertical_id.lower()
+    vertical_cfg = next((v for v in agency_config.get("verticals", []) if v.get("id", "").lower() == v_id), None)
+    if not vertical_cfg or not vertical_cfg.get("title_template"):
+        return fallback
+
+    template = vertical_cfg["title_template"]
+    lower_meta = {k.lower(): v for k, v in metadata.items()}
+
+    def _replacer(match):
+        key = match.group(1).lower()
+        val = lower_meta.get(key, "")
+        return str(val).strip() if val else ""
+
+    resolved = re.sub(r"\{(\w+)\}", _replacer, template).strip()
+    resolved = re.sub(r"^[&\s]+|[&\s]+$", "", resolved).strip()
+    return resolved if resolved else fallback
+
+
 # ─── Helpers (event summary) ────────────────────────────────────────────────
 
 def _summarise_event(ev: dict) -> dict:
@@ -43,14 +120,19 @@ def _summarise_event(ev: dict) -> dict:
     }
 
 
-def _summarise_project(proj: dict) -> dict:
-    """Return a lean project dict with event summaries instead of full events."""
+def _summarise_project(proj: dict, agency_config: Optional[dict]) -> dict:
+    """Return a lean project dict with event summaries, resolved title, and key metadata.
+    Accepts pre-fetched agency_config to avoid N+1 DB lookups."""
+    title = _resolve_title(proj, agency_config)
+    metadata = proj.get("metadata", {})
     return {
         "_id": str(proj["_id"]) if "_id" in proj else None,
         "code": proj.get("code"),
+        "project_name": title,
         "vertical": proj.get("vertical"),
         "client_id": proj.get("client_id"),
-        "client_name": proj.get("metadata", {}).get("client_name"),
+        "client_name": metadata.get("client_name"),
+        "metadata": {k: v for k, v in metadata.items() if k != "client_name" and v},
         "status": proj.get("status"),
         "lead_source": proj.get("lead_source"),
         "events": [_summarise_event(e) for e in proj.get("events", [])],
@@ -74,26 +156,26 @@ async def list_projects(
     """List projects with event summaries. Scope to a vertical if provided, else search globally. Use /projects/{id} for full details."""
     query = {}
     if vertical:
-        # Agent might pass 'pluto' or 'Pluto', make it case-insensitive without strict anchoring
-        query["vertical"] = {"$regex": vertical, "$options": "i"}
+        # Agent might pass 'pluto' or 'Pluto', make it case-insensitive but exact match
+        query["vertical"] = {"$regex": f"^{re.escape(vertical)}$", "$options": "i"}
     if status:
         query["status"] = status
     if search:
-        query["$or"] = [
-            {"metadata.client_name": {"$regex": search, "$options": "i"}},
-            {"code": {"$regex": search, "$options": "i"}},
-        ]
+        query["$or"] = _build_search_or(search)
 
     skip = (page - 1) * limit
     cursor = db.projects.find(query).sort("_id", -1).skip(skip).limit(limit)
     projects = await cursor.to_list(length=limit)
     total = await db.projects.count_documents(query)
 
+    # Fetch agency config ONCE for title resolution (eliminates N+1 DB queries)
+    agency_config = await db.agency_configs.find_one({}) if projects else None
+
     return {
         "total": total,
         "page": page,
         "limit": limit,
-        "data": [_summarise_project(p) for p in projects],
+        "data": [_summarise_project(p, agency_config) for p in projects],
     }
 
 
@@ -116,11 +198,11 @@ async def get_project_stats(
     ongoing = await db.projects.count_documents(ongoing_query)
 
     now = datetime.now(timezone.utc)
-    start_of_month = datetime(now.year, now.month, 1)
+    start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     if now.month == 12:
-        next_month = datetime(now.year + 1, 1, 1)
+        next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
     else:
-        next_month = datetime(now.year, now.month + 1, 1)
+        next_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
 
     month_query = {
         **base_query,
@@ -140,13 +222,32 @@ async def get_project(
     if ObjectId.is_valid(identifier):
         project = await db.projects.find_one({"_id": ObjectId(identifier)})
     else:
-        # Assume it's a project code
-        project = await db.projects.find_one({"code": identifier.upper()})
+        code = _normalise_code(identifier)
+        project = await db.projects.find_one({"code": code})
 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     return _clean_id(project)
+
+
+async def get_project_summary(
+    identifier: str,
+    db: ScopedDatabase = Depends(get_integration_db),
+):
+    """Agent-friendly project summary: returns structured, token-efficient data
+    instead of the raw MongoDB document. Used by the agent's get_project_details(view='full')."""
+    if ObjectId.is_valid(identifier):
+        project = await db.projects.find_one({"_id": ObjectId(identifier)})
+    else:
+        code = _normalise_code(identifier)
+        project = await db.projects.find_one({"code": code})
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    agency_config = await db.agency_configs.find_one({})
+    return _summarise_project(project, agency_config)
 
 
 @router.get("/projects/{identifier}/team")
@@ -155,7 +256,7 @@ async def get_project_team(
     db: ScopedDatabase = Depends(get_integration_db),
 ):
     """Token-saver: Fetch only event names, dates, and assigned associates."""
-    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": identifier.upper()}
+    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": _normalise_code(identifier)}
     project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.start_date": 1, "events.assignments": 1})
     
     if not project:
@@ -179,7 +280,7 @@ async def get_project_schedule(
     db: ScopedDatabase = Depends(get_integration_db),
 ):
     """Token-saver: Fetch only event names, dates, and venues."""
-    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": identifier.upper()}
+    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": _normalise_code(identifier)}
     project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.start_date": 1, "events.end_date": 1, "events.venue_name": 1, "events.venue_location": 1})
     
     if not project:
@@ -205,7 +306,7 @@ async def get_pending_deliverables(
     db: ScopedDatabase = Depends(get_integration_db),
 ):
     """Token-saver: Fetch only pending deliverables for a project."""
-    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": identifier.upper()}
+    query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": _normalise_code(identifier)}
     project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.deliverables": 1})
     
     if not project:
@@ -241,11 +342,12 @@ async def list_clients(
     """List clients with optional filters."""
     query = {}
     if client_type:
-        query["type"] = {"$regex": f"^{client_type}$", "$options": "i"}
+        query["type"] = {"$regex": f"^{re.escape(client_type)}$", "$options": "i"}
     if search:
+        safe = re.escape(search)
         query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": safe, "$options": "i"}},
+            {"phone": {"$regex": safe, "$options": "i"}},
         ]
 
     skip = (page - 1) * limit
@@ -264,7 +366,7 @@ async def get_client_stats(db: ScopedDatabase = Depends(get_integration_db)):
     active = await db.clients.count_documents({"type": "Active Client"})
 
     now = datetime.now(timezone.utc)
-    start_of_month = datetime(now.year, now.month, 1)
+    start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     this_month = await db.clients.count_documents({"created_at": {"$gte": start_of_month}})
 
     return {"total": total, "active": active, "this_month": this_month}
@@ -284,13 +386,14 @@ async def list_associates(
     """List associates with optional filters."""
     query = {}
     if role:
-        query["primary_role"] = {"$regex": f"^{role}$", "$options": "i"}
+        query["primary_role"] = {"$regex": f"^{re.escape(role)}$", "$options": "i"}
     if employment_type:
-        query["employment_type"] = {"$regex": f"^{employment_type}$", "$options": "i"}
+        query["employment_type"] = {"$regex": f"^{re.escape(employment_type)}$", "$options": "i"}
     if search:
+        safe = re.escape(search)
         query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": safe, "$options": "i"}},
+            {"phone": {"$regex": safe, "$options": "i"}},
         ]
 
     skip = (page - 1) * limit
@@ -318,7 +421,8 @@ async def get_associate_contact(
     db: ScopedDatabase = Depends(get_integration_db),
 ):
     """Token-saver: Fetch only contact info for associates matching a name."""
-    query = {"name": {"$regex": search, "$options": "i"}}
+    safe = re.escape(search)
+    query = {"name": {"$regex": safe, "$options": "i"}}
     cursor = db.associates.find(query, {"name": 1, "email_id": 1, "email": 1, "phone": 1, "primary_role": 1}).limit(5)
     associates = await cursor.to_list(length=5)
     
@@ -338,6 +442,7 @@ async def get_associate_contact(
 @router.get("/events")
 async def list_events(
     vertical: Optional[str] = None,
+    search: Optional[str] = None,
     from_date: Optional[str] = Query(None, description="ISO date string, e.g. 2026-03-01"),
     to_date: Optional[str] = Query(None, description="ISO date string, e.g. 2026-04-01"),
     unassigned_only: bool = Query(False, description="If true, only return events with no assignments"),
@@ -347,23 +452,45 @@ async def list_events(
     """Flat listing of events across projects with project context.
 
     Useful for answering: upcoming events, events near a date, events without team, etc.
+    The `search` parameter matches against event type, client name, and metadata name fields
+    (groom_name, bride_name, child_name, event_name).
     """
     # Build the match stage
     match: dict = {"status": {"$nin": ["completed", "Completed", "archived", "Archived", "cancelled", "Cancelled"]}}
     if vertical:
-        match["vertical"] = {"$regex": f"^{vertical}$", "$options": "i"}
+        match["vertical"] = {"$regex": f"^{re.escape(vertical)}$", "$options": "i"}
+    if search:
+        match["$or"] = _build_search_or(search)
 
     pipeline: list = [
         {"$match": match},
         {"$unwind": "$events"},
     ]
 
+    # Post-unwind: filter to only matching events (by event type) or all events
+    # of name-matched projects. Reuses the shared search helper but operates on
+    # the unwound event structure.
+    if search:
+        search_or = _build_search_or(search)
+        pipeline.append({"$match": {"$or": search_or}})
+
     # Date-range filter on the unwound event
     event_match: dict = {}
     if from_date:
-        event_match["events.start_date"] = {"$gte": datetime.fromisoformat(from_date)}
+        # Ensure aware datetime
+        dt = datetime.fromisoformat(from_date)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        event_match["events.start_date"] = {"$gte": dt}
     if to_date:
-        event_match.setdefault("events.start_date", {})["$lt"] = datetime.fromisoformat(to_date)
+        to_dt = datetime.fromisoformat(to_date)
+        if to_dt.tzinfo is None:
+            to_dt = to_dt.replace(tzinfo=timezone.utc)
+        if len(to_date) == 10:
+            # If only date is provided, make it inclusive of the whole day
+            from datetime import timedelta
+            to_dt += timedelta(days=1)
+        event_match.setdefault("events.start_date", {})["$lt"] = to_dt
     if unassigned_only:
         event_match["events.assignments"] = {"$size": 0}
     if event_match:
@@ -371,29 +498,41 @@ async def list_events(
 
     pipeline.extend([
         {"$sort": {"events.start_date": 1}},
-        {"$limit": limit},
-        {"$project": {
-            "_id": 0,
-            "project_id": {"$toString": "$_id"},
-            "project_code": "$code",
-            "client_id": "$client_id",
-            "client_name": "$metadata.client_name",
-            "vertical": "$vertical",
-            "project_status": "$status",
-            "event_id": "$events.id",
-            "event_type": "$events.type",
-            "venue_name": "$events.venue_name",
-            "venue_location": "$events.venue_location",
-            "start_date": "$events.start_date",
-            "end_date": "$events.end_date",
-            "assignment_count": {"$size": {"$ifNull": ["$events.assignments", []]}},
-            "deliverable_count": {"$size": {"$ifNull": ["$events.deliverables", []]}},
-        }},
+        {"$facet": {
+            "metadata": [{"$count": "total"}],
+            "data": [
+                {"$limit": limit},
+                {"$project": {
+                    "_id": 0,
+                    "project_id": {"$toString": "$_id"},
+                    "project_code": "$code",
+                    "client_id": "$client_id",
+                    "client_name": "$metadata.client_name",
+                    "groom_name": "$metadata.groom_name",
+                    "bride_name": "$metadata.bride_name",
+                    "vertical": "$vertical",
+                    "project_status": "$status",
+                    "event_id": "$events.id",
+                    "event_type": "$events.type",
+                    "venue_name": "$events.venue_name",
+                    "venue_location": "$events.venue_location",
+                    "start_date": "$events.start_date",
+                    "end_date": "$events.end_date",
+                    "assignment_count": {"$size": {"$ifNull": ["$events.assignments", []]}},
+                    "deliverable_count": {"$size": {"$ifNull": ["$events.deliverables", []]}},
+                }}
+            ]
+        }}
     ])
 
     cursor = db.projects.aggregate(pipeline)
-    events = await cursor.to_list(length=limit)
-    return {"total": len(events), "data": events}
+    results = await cursor.to_list(length=1)
+    
+    if not results or not results[0]["data"]:
+        return {"total": 0, "data": []}
+        
+    total = results[0]["metadata"][0]["total"] if results[0]["metadata"] else 0
+    return {"total": total, "data": results[0]["data"]}
 
 
 # ─── Associate Assignments ──────────────────────────────────────────────────

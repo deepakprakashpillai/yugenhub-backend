@@ -48,8 +48,8 @@ async def get_dashboard_stats(current_user: UserModel = Depends(get_current_user
         "assigned_to": current_user.id,
         "status": {"$ne": "done"},
         "due_date": {
-            "$gte": datetime(now.year, now.month, now.day),
-            "$lt": datetime(now.year, now.month, now.day) + timedelta(days=1)
+            "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0),
+            "$lt": now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         }
     })
     
@@ -157,7 +157,7 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
 async def get_workload_stats(scope: str = "global", current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
     """Workload intelligence"""
     now = datetime.now(timezone.utc)
-    today_start = datetime(now.year, now.month, now.day)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_end = today_start + timedelta(days=7)
     
     if scope == "me":

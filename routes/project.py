@@ -299,7 +299,7 @@ async def list_projects(
     view: str = "all",
     sort: str = "newest",
     page: int = Query(1, ge=1), 
-    limit: int = Query(12, le=50000),
+    limit: int = Query(12, le=1000),
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
 ):
@@ -308,10 +308,15 @@ async def list_projects(
     def parse_event_date(date_val):
         if not date_val: return None
         if isinstance(date_val, datetime):
-            return date_val.replace(tzinfo=None)
+            if date_val.tzinfo is None:
+                return date_val.replace(tzinfo=timezone.utc)
+            return date_val
         if isinstance(date_val, str):
             try:
-                return datetime.fromisoformat(date_val.replace('Z', '+00:00')).replace(tzinfo=None)
+                dt = datetime.fromisoformat(date_val.replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
             except ValueError:
                 return None
         return None
@@ -425,7 +430,8 @@ async def list_projects(
                 event_date = parse_event_date(e.get("start_date"))
                 if not event_date: continue
 
-                # Check if event is in the past
+                if event_date.tzinfo is None:
+                    event_date = event_date.replace(tzinfo=timezone.utc)
                 if event_date < now:
                     # Check tasks for THIS specific event
                     eid = str(e.get("id"))
@@ -447,18 +453,22 @@ async def list_projects(
             if sort == "upcoming":
                 nows = datetime.now(timezone.utc)
                 future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
-                future_dates = [d for d in future_events if d and d > nows]
-                return min(future_dates) if future_dates else datetime(9999, 12, 31)
+                return min(future_dates) if future_dates else datetime(9999, 12, 31, tzinfo=timezone.utc)
             
             val = p.get("created_on")
             if isinstance(val, datetime):
-                return val.replace(tzinfo=None)
+                if val.tzinfo is None:
+                    return val.replace(tzinfo=timezone.utc)
+                return val
             elif isinstance(val, str):
                 try:
-                    return datetime.fromisoformat(val.replace("Z", "+00:00")).replace(tzinfo=None)
+                    dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
                 except ValueError:
-                    return datetime.min
-            return datetime.min
+                    return datetime.min.replace(tzinfo=timezone.utc)
+            return datetime.min.replace(tzinfo=timezone.utc)
 
         if sort == "upcoming":
             prod_projects.sort(key=safe_sort_key)
@@ -478,7 +488,7 @@ async def list_projects(
             now = datetime.now(timezone.utc)
             future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
             future_dates = [d for d in future_events if d and d > now]
-            return min(future_dates) if future_dates else datetime(9999, 12, 31)
+            return min(future_dates) if future_dates else datetime(9999, 12, 31, tzinfo=timezone.utc)
 
         all_projects.sort(key=get_next_event_date)
         
@@ -674,11 +684,11 @@ async def get_project_stats(vertical: str = None, current_user: UserModel = Depe
     # 3. This Month (Active Projects having events in the current month)
     # MUST be a subset of 'active' to ensure logical numbers (This Month <= Active)
     now = datetime.now(timezone.utc)
-    start_of_month = datetime(now.year, now.month, 1)
+    start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     if now.month == 12:
-        next_month = datetime(now.year + 1, 1, 1)
+        next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
     else:
-        next_month = datetime(now.year, now.month + 1, 1)
+        next_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
     
     month_query = base_query.copy() # Revert to ALL projects (including Completed)
     # Check if ANY event in the 'events' array falls within the current month ranges.

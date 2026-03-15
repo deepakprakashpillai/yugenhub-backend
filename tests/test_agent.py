@@ -70,14 +70,25 @@ async def test_agent_missing_agency_id_returns_422(async_client: AsyncClient):
 
 # ─── Tools Binding ────────────────────────────────────────────────────────
 
-async def test_build_tools_binds_correctly():
-    """Verify tool factory returns all expected tools wrapped."""
-    from agent.tools import build_tools
+async def test_tool_defs_schema_only():
+    """Verify tool definitions return correctly typed schemas."""
+    from agent.tools import get_tool_defs
+    
+    defs = get_tool_defs()
+    assert len(defs) == 9
+    tool_names = [t.name for t in defs]
+    assert "list_projects" in tool_names
+    assert "get_statistics" in tool_names
+    assert "get_project_details" in tool_names
+
+async def test_create_tool_executors_binds_correctly():
+    """Verify tool executor factory returns all expected tools bound to a DB scope."""
+    from agent.tools import create_tool_executors
     from middleware.db_guard import ScopedDatabase
     from database import db as raw_db
     
     db = ScopedDatabase(raw_db, AGENCY_ID)
-    tools = build_tools(db)
+    tools = create_tool_executors(db)
     
     assert len(tools) == 9
     tool_names = [t.name for t in tools]
@@ -89,14 +100,20 @@ async def test_build_tools_binds_correctly():
 # ─── Endpoint Functionality (Mocked LLM) ───────────────────────────────────
 
 from unittest.mock import patch, AsyncMock
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 
-@patch("agent.graph.ChatGoogleGenerativeAI.ainvoke")
-async def test_agent_query_endpoint(mock_ainvoke, async_client: AsyncClient):
+@patch("routes.agent.run_agent")
+async def test_agent_query_endpoint(mock_run_agent, async_client: AsyncClient):
     """Test the endpoint returns the final AI message from the graph."""
     
-    # Mock the LLM's ainvoke method to return a valid AIMessage
-    mock_ainvoke.return_value = AIMessage(content="You have 5 active projects.")
+    # Mock run_agent to return a valid result dict
+    mock_run_agent.return_value = {
+        "messages": [
+            SystemMessage(content="system prompt"),
+            HumanMessage(content="test"),
+            AIMessage(content="You have 5 active projects."),
+        ]
+    }
     
     resp = await async_client.post(
         "/api/agent/query",
@@ -112,15 +129,21 @@ async def test_agent_query_endpoint(mock_ainvoke, async_client: AsyncClient):
     # By default steps should NOT be included
     assert "steps" not in data
 
-@patch("agent.graph.ChatGoogleGenerativeAI.ainvoke")
-async def test_agent_query_with_steps(mock_ainvoke, async_client: AsyncClient):
+@patch("routes.agent.run_agent")
+async def test_agent_query_with_steps(mock_run_agent, async_client: AsyncClient):
     """Test the endpoint returns steps when include_steps is True."""
     
-    # Mock the LLM's ainvoke method to return a valid AIMessage
-    mock_ainvoke.return_value = AIMessage(
-        content="Final answer.",
-        tool_calls=[{"name": "list_projects", "args": {}, "id": "call_123", "type": "tool_call"}]
-    )
+    # Mock run_agent to return a result with tool calls
+    mock_run_agent.return_value = {
+        "messages": [
+            SystemMessage(content="system prompt"),
+            HumanMessage(content="test"),
+            AIMessage(
+                content="Final answer.",
+                tool_calls=[{"name": "list_projects", "args": {}, "id": "call_123", "type": "tool_call"}]
+            ),
+        ]
+    }
     
     payload = base_payload().copy()
     payload["include_steps"] = True

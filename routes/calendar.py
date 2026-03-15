@@ -32,9 +32,15 @@ async def get_calendar_events(
     # Parse dates
     try:
         start_dt = datetime.fromisoformat(start)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+            
         end_dt = datetime.fromisoformat(end)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+            
         # Adjust end date to include the full day
-        end_dt = end_dt.replace(hour=23, minute=59, second=59)
+        end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
@@ -164,6 +170,9 @@ async def get_calendar_events(
 
     # Sort by date
     calendar_items.sort(key=lambda x: x["date"])
+    
+    # Cap total items for stability
+    calendar_items = calendar_items[:500]
 
     logger.debug(f"Calendar query completed", extra={"data": {"start": start, "end": end, "type": type, "items_returned": len(calendar_items)}})
     return calendar_items
