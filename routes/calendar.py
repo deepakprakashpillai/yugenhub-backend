@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 # REMOVED raw collection imports
 from models.user import UserModel
 from routes.deps import get_current_user, get_db, get_user_verticals
