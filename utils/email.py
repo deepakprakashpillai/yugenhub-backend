@@ -1,7 +1,7 @@
 import resend
 from config import config
 from logging_config import get_logger
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = get_logger("email")
 

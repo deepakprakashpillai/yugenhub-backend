@@ -272,7 +272,7 @@ async def test_invite_creates_associate(async_client: AsyncClient, auth_headers:
 
     # Check that an associate was created
     assoc_resp = await async_client.get(
-        "/api/associates?limit=50000",
+        "/api/associates?limit=1000",
         headers=auth_headers,
     )
     assert assoc_resp.status_code == 200
@@ -306,7 +306,7 @@ async def test_remove_user_deactivates_associate(async_client: AsyncClient, auth
 
     # Check associate is now inactive
     assoc_resp = await async_client.get(
-        "/api/associates?limit=50000",
+        "/api/associates?limit=1000",
         headers=auth_headers,
     )
     associates = assoc_resp.json().get("data", [])
