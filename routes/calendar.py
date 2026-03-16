@@ -81,6 +81,10 @@ async def get_calendar_events(
                     evt_dt = evt_date
                 else:
                     continue
+                
+                # Ensure evt_dt is timezone-aware (UTC) for comparison
+                if evt_dt.tzinfo is None:
+                    evt_dt = evt_dt.replace(tzinfo=timezone.utc)
                     
                 if not (start_dt <= evt_dt <= end_dt):
                     continue
@@ -151,6 +155,10 @@ async def get_calendar_events(
             if not task_dt:
                 continue
 
+            # Ensure task_dt is timezone-aware (UTC) for comparison
+            if task_dt.tzinfo is None:
+                task_dt = task_dt.replace(tzinfo=timezone.utc)
+                
             # Filter by Date Range
             if not (start_dt <= task_dt <= end_dt):
                 continue
