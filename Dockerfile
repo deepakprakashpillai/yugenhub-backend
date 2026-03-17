@@ -13,6 +13,9 @@ WORKDIR /app
 # Copy only requirements first (better caching)
 COPY requirements.txt .
 
+# Install system dependencies (ffmpeg for video thumbnails/watermarks)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt

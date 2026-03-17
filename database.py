@@ -85,3 +85,6 @@ ledgers_collection = AsyncCollectionProxy("finance_ledgers")
 invoices_collection = AsyncCollectionProxy("finance_invoices")
 payouts_collection = AsyncCollectionProxy("finance_payouts")
 
+# Portal Analytics
+portal_analytics_collection = AsyncCollectionProxy("portal_analytics")
+

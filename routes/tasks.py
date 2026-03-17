@@ -12,6 +12,10 @@ from logging_config import get_logger
 from config import config
 from utils.email import send_task_assignment_email
 from utils.push import send_push_notification
+from services.deliverable_sync import (
+    on_deliverable_task_created, on_task_status_changed,
+    on_task_quantity_changed, on_task_deleted,
+)
 import uuid
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
@@ -231,9 +235,13 @@ async def create_task(
     
     result = await db.tasks.insert_one(task.model_dump())
     created_task = await db.tasks.find_one({"_id": result.inserted_id})
-    
+
     # Log creation
     await log_history(db, task.id, current_user.id, {"creation": (None, "Task Created")})
+
+    # Auto-create portal deliverables for deliverable tasks
+    if task.category == "deliverable" and task.project_id:
+        await on_deliverable_task_created(db, task.model_dump(), task.project_id)
     
     # --- NOTIFICATION LOGIC (CREATE) ---
     if task.assigned_to and task.assigned_to != current_user.id:
@@ -525,7 +533,19 @@ async def update_task(
     
     # Log History
     await log_history(db, task_id, current_user.id, changes, comment)
-    
+
+    # --- DELIVERABLE SYNC ---
+    if existing_task.get("category") == "deliverable":
+        updated_task = await db.tasks.find_one({"id": task_id})
+        if "status" in changes:
+            old_s, new_s = changes["status"]
+            await on_task_status_changed(db, updated_task, old_s, new_s)
+        if "quantity" in changes:
+            old_q, new_q = changes["quantity"]
+            project_id = existing_task.get("project_id")
+            if project_id:
+                await on_task_quantity_changed(db, updated_task, old_q, new_q, project_id)
+
     # --- NOTIFICATION LOGIC (UPDATE) ---
     if "assigned_to" in changes:
         old_assignee, new_assignee = changes["assigned_to"]
@@ -618,12 +638,21 @@ async def delete_task(
     if current_user.role not in ["owner", "admin"]:
         logger.warning(f"Task deletion denied: insufficient role", extra={"data": {"task_id": task_id, "role": current_user.role}})
         raise HTTPException(status_code=403, detail="Only Owners and Admins can delete tasks")
-        
+
+    # Fetch before deletion for sync cleanup
+    existing_task = await db.tasks.find_one({"id": task_id})
+    if not existing_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
     result = await db.tasks.delete_one({"id": task_id})
     if result.deleted_count == 0:
         logger.warning(f"Task deletion failed: not found", extra={"data": {"task_id": task_id}})
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
+    # Clean up linked portal deliverables
+    if existing_task.get("category") == "deliverable":
+        await on_task_deleted(db, existing_task)
+
     logger.info(f"Task deleted", extra={"data": {"task_id": task_id}})
     return {"message": "Task deleted successfully"}
 
