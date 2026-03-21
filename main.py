@@ -3,16 +3,27 @@ from logging_config import setup_logging
 # Initialize logging BEFORE anything else
 setup_logging()
 
+import asyncio
+from contextlib import asynccontextmanager
 from logging_config import get_logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from middleware import RequestLifecycleMiddleware
-from routes import associate, client, config as config_router, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance, push, integration, agent, portal
+from routes import associate, client, config as config_router, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance, push, integration, agent, portal, album
 from config import config
 
 logger = get_logger("app")
 
-app = FastAPI(title="YugenHub API")
+
+@asynccontextmanager
+async def lifespan(app):
+    from routes.album import expire_albums_loop
+    task = asyncio.create_task(expire_albums_loop())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="YugenHub API", lifespan=lifespan)
 
 # CORS remains here as it's a global setting
 app.add_middleware(
@@ -44,6 +55,7 @@ app.include_router(push.router)
 app.include_router(integration.router)
 app.include_router(agent.router)
 app.include_router(portal.router)
+app.include_router(album.router)
 
 logger.info("All routers registered, YugenHub API ready")
 

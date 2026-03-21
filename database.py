@@ -88,3 +88,7 @@ payouts_collection = AsyncCollectionProxy("finance_payouts")
 # Portal Analytics
 portal_analytics_collection = AsyncCollectionProxy("portal_analytics")
 
+# Albums
+albums_collection = AsyncCollectionProxy("albums")
+album_analytics_collection = AsyncCollectionProxy("album_analytics")
+
