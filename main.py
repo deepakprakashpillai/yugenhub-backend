@@ -28,7 +28,7 @@ app = FastAPI(title="YugenHub API", lifespan=lifespan)
 # CORS remains here as it's a global setting
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[config.FRONTEND_URL] if config.ENV == "production" else ["*"], 
+    allow_origins=config.FRONTEND_URL if config.ENV == "production" else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
