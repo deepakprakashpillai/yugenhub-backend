@@ -91,7 +91,7 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
             "type": "task",
             "id": t.get("id"),
             "title": t.get("title"),
-            "reason": f"Overdue by {(now - t.get('due_date')).days} days",
+            "reason": f"Overdue by {(now - t.get('due_date').replace(tzinfo=timezone.utc)).days} days",
             "priority": "high",
             "link": "/tasks" 
         })

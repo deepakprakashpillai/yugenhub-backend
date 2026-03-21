@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Body, HTTPException, Query, BackgroundTasks
 import re # IMPORTED
+import secrets
 from bson import ObjectId
 from datetime import datetime, timezone
 # REMOVED raw collection imports
-from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel
+from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel, PortalDeliverableModel, FeedbackEntry, DeliverableFile
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
 from routes.deps import get_current_user, get_db, get_user_verticals
@@ -14,7 +15,13 @@ from logging_config import get_logger
 from config import config
 from utils.email import send_event_assignment_email
 from utils.push import send_push_notification
+from utils.r2 import generate_presigned_put_url, delete_r2_object
 from automations.calendar import sync_event_to_calendar, sync_attendee_to_calendar
+from services.deliverable_sync import (
+    on_deliverable_task_created, on_task_status_changed,
+    on_task_quantity_changed, reconcile_project,
+    on_portal_file_added, on_portal_file_removed,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
@@ -195,6 +202,7 @@ async def create_project(
         project.code = await get_next_sequence_value(db, project.vertical)
 
     project_data = project.model_dump()
+    project_data["portal_token"] = secrets.token_urlsafe(32)
     project_data["code"] = project_data["code"].upper()
     
     # Double check for duplicate (Collision guardrail)
@@ -245,14 +253,16 @@ async def create_project(
                         description=f"Deliverable for {event.type}",
                         project_id=project_id,
                         event_id=event.id,
+                        deliverable_id=deliverable.id,
                         status="todo",
-                        priority=deliverable.status.lower() if hasattr(deliverable, 'priority') else "medium", # Fallback
+                        priority="medium",
                         due_date=deliverable.due_date,
                         assigned_to=deliverable.incharge_id,
                         studio_id=current_user.agency_id,
                         created_by=current_user.id,
                         type="project",
-                        category="deliverable"
+                        category="deliverable",
+                        quantity=deliverable.quantity,
                     )
                     all_new_tasks.append(task.model_dump())
             
@@ -285,6 +295,9 @@ async def create_project(
         
         if all_new_tasks:
             await db.tasks.insert_many(all_new_tasks)
+            # Auto-create portal deliverables for each task
+            for task_dict in all_new_tasks:
+                await on_deliverable_task_created(db, task_dict, project_id)
             logger.info(f"Created {len(all_new_tasks)} tasks during project creation", extra={"data": {"project_id": project_id}})
 
     logger.info(f"Project created with sequential code", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical'], "event_count": len(project.events)}})
@@ -926,29 +939,25 @@ async def update_event(
                     needs_calendar_sync = True
                     break
 
-    # If deliverables are being updated, we need to sync them to Tasks
-    # Find existing tasks for this event
+    # If deliverables are being updated, sync to Tasks using deliverable_id FK
     if "deliverables" in update_data:
         existing_tasks = await db.tasks.find({"project_id": project_id, "event_id": event_id, "category": "deliverable"}).to_list(length=None)
-        existing_task_deliverable_ids = [t.get("metadata", {}).get("deliverable_id") for t in existing_tasks]
+        existing_task_by_deliv_id = {t.get("deliverable_id"): t for t in existing_tasks if t.get("deliverable_id")}
         all_new_tasks = []
-        project_code = old_project.get("code", "PROJECT")
         event_type = old_event.get("type", "Event")
 
         for deliverable in update_data["deliverables"]:
-            # If this is a new deliverable (doesn't exist in tasks or is newly generated)
             deliv_id = deliverable.get("id")
-            
-            # Very basic sync: just create tasks for deliverables that don't have one yet.
-            # In a full sync, we'd also update/delete tasks, but since deliverables
-            # are usually managed via TaskModal now, this is mainly for the "Edit Event" modal fallback.
-            if deliv_id not in existing_task_deliverable_ids:
+            existing_task = existing_task_by_deliv_id.get(deliv_id)
+
+            if not existing_task:
+                # New deliverable — create task
                 task = TaskModel(
                     title=f"{deliverable.get('type', 'Deliverable')} ({event_type})",
                     description=f"Deliverable for {event_type}",
                     project_id=project_id,
                     event_id=event_id,
-                    status=deliverable.get('status', 'Pending').lower(),
+                    deliverable_id=deliv_id,
                     priority="medium",
                     due_date=deliverable.get('due_date'),
                     assigned_to=deliverable.get('incharge_id'),
@@ -957,23 +966,30 @@ async def update_event(
                     type="project",
                     category="deliverable",
                     quantity=deliverable.get("quantity", 1),
-                    metadata={"deliverable_id": deliv_id}
                 )
                 all_new_tasks.append(task.model_dump())
             else:
+                # Existing deliverable — update task fields
+                old_qty = existing_task.get("quantity", 1)
+                new_qty = deliverable.get("quantity", 1)
                 await db.tasks.update_one(
-                    {"project_id": project_id, "event_id": event_id, "category": "deliverable", "metadata.deliverable_id": deliv_id},
+                    {"id": existing_task["id"]},
                     {"$set": {
-                        "status": deliverable.get('status', 'Pending').lower(),
                         "due_date": deliverable.get('due_date'),
-                        "quantity": deliverable.get("quantity", 1),
+                        "quantity": new_qty,
                         "title": f"{deliverable.get('type', 'Deliverable')} ({event_type})",
-                        "updated_on": datetime.now(timezone.utc)
+                        "updated_at": datetime.now(timezone.utc),
                     }}
                 )
-        
-        if all_new_tasks: # Changed from new_tasks to all_new_tasks
-            await db.tasks.insert_many(all_new_tasks) # Changed from new_tasks to all_new_tasks
+                # Sync portal deliverables if quantity changed
+                if old_qty != new_qty:
+                    updated_task = await db.tasks.find_one({"id": existing_task["id"]})
+                    await on_task_quantity_changed(db, updated_task, old_qty, new_qty, project_id)
+
+        if all_new_tasks:
+            await db.tasks.insert_many(all_new_tasks)
+            for task_dict in all_new_tasks:
+                await on_deliverable_task_created(db, task_dict, project_id)
             logger.info(f"Created synced tasks from deliverables", extra={"data": {"count": len(all_new_tasks), "project_id": project_id}})
 
     # Prefix keys with "events.$." to update the matched array element
@@ -1246,3 +1262,759 @@ async def get_associate_schedule(associate_id: str, current_user: UserModel = De
     ]}
     projects = await db.projects.find(query).to_list(1000)
     return parse_mongo_data(projects)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Portal Deliverables (Internal, Auth Required)
+# ──────────────────────────────────────────────────────────────────────
+
+@router.post("/{project_id}/portal-token")
+async def generate_portal_token(
+    project_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Lazy-generate portal_token for existing projects that don't have one."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.get("portal_token"):
+        return {"portal_token": project["portal_token"]}
+
+    token = secrets.token_urlsafe(32)
+    await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$set": {"portal_token": token, "updated_on": datetime.now(timezone.utc)}}
+    )
+    return {"portal_token": token}
+
+
+@router.post("/{project_id}/deliverables/upload-url")
+async def get_upload_url(
+    project_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Returns a presigned R2 PUT URL for direct browser upload."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    file_name = body.get("file_name")
+    content_type = body.get("content_type", "application/octet-stream")
+    if not file_name:
+        raise HTTPException(status_code=400, detail="file_name is required")
+
+    import uuid
+    r2_key = f"deliverables/{current_user.agency_id}/{project_id}/{uuid.uuid4()}_{file_name}"
+    public_url = f"{config.R2_PUBLIC_URL}/{r2_key}" if config.R2_PUBLIC_URL else ""
+
+    presigned_url = generate_presigned_put_url(r2_key, content_type)
+
+    return {
+        "upload_url": presigned_url,
+        "r2_key": r2_key,
+        "r2_url": public_url,
+    }
+
+
+@router.post("/{project_id}/sync-deliverables")
+async def sync_deliverables_from_events(
+    project_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Reconcile portal deliverables with deliverable tasks (ID-based)."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = await reconcile_project(db, project_id)
+    return result
+
+
+@router.post("/{project_id}/deliverables")
+async def create_deliverable(
+    project_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Create a new portal deliverable for a project."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    deliverable = PortalDeliverableModel(
+        title=body.get("title", "Untitled"),
+        description=body.get("description", ""),
+        event_id=body.get("event_id"),
+    )
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {
+            "$push": {"portal_deliverables": deliverable.model_dump()},
+            "$set": {"updated_on": datetime.now(timezone.utc)},
+        }
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return deliverable.model_dump()
+
+
+@router.get("/{project_id}/deliverables")
+async def list_deliverables(
+    project_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """List all portal deliverables for a project."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1, "portal_token": 1, "events": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    events_summary = [
+        {"id": e.get("id"), "type": e.get("type")}
+        for e in project.get("events", [])
+    ]
+
+    return {
+        "deliverables": project.get("portal_deliverables", []),
+        "portal_token": project.get("portal_token"),
+        "events": events_summary,
+    }
+
+
+@router.patch("/{project_id}/deliverables/{deliverable_id}")
+async def update_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update a portal deliverable (title, description, status)."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    set_fields = {}
+    for field in ["title", "description", "status", "event_id"]:
+        if field in body:
+            set_fields[f"portal_deliverables.$[d].{field}"] = body[field]
+    set_fields["portal_deliverables.$[d].updated_on"] = datetime.now(timezone.utc)
+    set_fields["updated_on"] = datetime.now(timezone.utc)
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$set": set_fields},
+        array_filters=[{"d.id": deliverable_id}]
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {"message": "Deliverable updated"}
+
+
+@router.delete("/{project_id}/deliverables/{deliverable_id}")
+async def delete_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Remove a deliverable and delete all associated R2 objects."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    # Fetch files to delete from R2
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    deliverable = next(
+        (d for d in project.get("portal_deliverables", []) if d["id"] == deliverable_id),
+        None
+    )
+    if deliverable:
+        for f in deliverable.get("files", []):
+            delete_r2_object(f["r2_key"])
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {
+            "$pull": {"portal_deliverables": {"id": deliverable_id}},
+            "$set": {"updated_on": datetime.now(timezone.utc)},
+        }
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Deliverable not found")
+
+    return {"message": "Deliverable deleted"}
+
+
+@router.post("/{project_id}/deliverables/{deliverable_id}/files")
+async def add_file_to_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    background_tasks: BackgroundTasks,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Add a file to an existing deliverable (called after presigned upload completes)."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    content_type = body.get("content_type", "application/octet-stream")
+    is_image = content_type.startswith("image/")
+    is_video = content_type.startswith("video/")
+
+    file_entry = DeliverableFile(
+        file_name=body["file_name"],
+        content_type=content_type,
+        r2_key=body["r2_key"],
+        r2_url=body["r2_url"],
+        thumbnail_status="pending" if (is_image or is_video) else "n/a",
+        watermark_status="pending" if is_video else "n/a",
+    )
+
+    now = datetime.now(timezone.utc)
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+        {
+            "$push": {"portal_deliverables.$.files": file_entry.model_dump()},
+            "$set": {
+                "portal_deliverables.$.updated_on": now,
+                "updated_on": now,
+            },
+        }
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project or deliverable not found")
+
+    # Auto-transition Pending -> Uploaded via sync service
+    await on_portal_file_added(db, project_id, deliverable_id)
+
+    # Queue thumbnail generation for image/video files
+    if is_image or is_video:
+        # Fetch agency_id for R2 path
+        project = await db.projects.find_one({"_id": ObjectId(project_id)}, {"agency_id": 1, "portal_watermark_enabled": 1, "portal_watermark_text": 1})
+        agency_id = project.get("agency_id", "default") if project else "default"
+        from services.media_processing import process_thumbnail, process_watermark
+        background_tasks.add_task(process_thumbnail, project_id, deliverable_id, file_entry.id, body["r2_key"], content_type, agency_id)
+
+        # Queue watermark for videos if watermark is enabled on the project
+        if is_video and project and project.get("portal_watermark_enabled"):
+            watermark_text = project.get("portal_watermark_text") or "Protected"
+            background_tasks.add_task(process_watermark, project_id, deliverable_id, file_entry.id, body["r2_key"], watermark_text, agency_id)
+
+    return file_entry.model_dump()
+
+
+@router.delete("/{project_id}/deliverables/{deliverable_id}/files/{file_id}")
+async def delete_file_from_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    file_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Remove a single file from a deliverable and delete from R2."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    # Find the file to get the r2_key
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    deliverable = next(
+        (d for d in project.get("portal_deliverables", []) if d["id"] == deliverable_id),
+        None
+    )
+    if deliverable:
+        file_entry = next((f for f in deliverable.get("files", []) if f["id"] == file_id), None)
+        if file_entry:
+            delete_r2_object(file_entry["r2_key"])
+            if file_entry.get("thumbnail_r2_key"):
+                delete_r2_object(file_entry["thumbnail_r2_key"])
+            if file_entry.get("watermark_r2_key"):
+                delete_r2_object(file_entry["watermark_r2_key"])
+
+    remaining_files = len([f for f in deliverable.get("files", []) if f["id"] != file_id]) if deliverable else 0
+    now = datetime.now(timezone.utc)
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+        {
+            "$pull": {"portal_deliverables.$.files": {"id": file_id}},
+            "$set": {
+                "portal_deliverables.$.updated_on": now,
+                "updated_on": now,
+            },
+        }
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Auto-transition Uploaded -> Pending if last file removed
+    await on_portal_file_removed(db, project_id, deliverable_id, remaining_files)
+
+    return {"message": "File deleted"}
+
+
+@router.post("/{project_id}/deliverables/{deliverable_id}/feedback")
+async def add_team_feedback(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Add team feedback to a deliverable."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    feedback = FeedbackEntry(
+        message=body["message"],
+        author_type="team",
+        author_name=current_user.name,
+        file_id=body.get("file_id"),
+    )
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+        {
+            "$push": {"portal_deliverables.$.feedback": feedback.model_dump()},
+            "$set": {
+                "portal_deliverables.$.updated_on": datetime.now(timezone.utc),
+                "updated_on": datetime.now(timezone.utc),
+            },
+        }
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project or deliverable not found")
+
+    return feedback.model_dump()
+
+
+# --- Portal Settings ---
+
+@router.patch("/{project_id}/portal-settings")
+async def update_portal_settings(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update portal settings (watermark, default download limit)."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    updates = {"updated_on": datetime.now(timezone.utc)}
+    was_watermark_enabled = project.get("portal_watermark_enabled", False)
+    new_watermark_enabled = body.get("portal_watermark_enabled")
+
+    if "portal_watermark_text" in body:
+        updates["portal_watermark_text"] = body["portal_watermark_text"]
+    if "portal_default_download_limit" in body:
+        updates["portal_default_download_limit"] = body["portal_default_download_limit"]
+    if new_watermark_enabled is not None:
+        updates["portal_watermark_enabled"] = new_watermark_enabled
+
+    await db.projects.update_one({"_id": ObjectId(project_id)}, {"$set": updates})
+
+    # Handle watermark toggle side effects
+    if new_watermark_enabled is not None and new_watermark_enabled != was_watermark_enabled:
+        portal_deliverables = project.get("portal_deliverables", [])
+        now = datetime.now(timezone.utc)
+
+        if new_watermark_enabled:
+            # Toggling ON: disable downloads on video deliverables, queue watermark processing
+            watermark_text = body.get("portal_watermark_text") or project.get("portal_watermark_text") or "Protected"
+            agency_id = project.get("agency_id", "default")
+
+            for pd in portal_deliverables:
+                has_video = any(f.get("content_type", "").startswith("video/") for f in pd.get("files", []))
+                if has_video:
+                    await db.projects.update_one(
+                        {"_id": ObjectId(project_id), "portal_deliverables.id": pd["id"]},
+                        {"$set": {
+                            "portal_deliverables.$.downloads_disabled": True,
+                            "portal_deliverables.$.updated_on": now,
+                        }}
+                    )
+                    # Queue watermark for unwatermarked video files
+                    from services.media_processing import process_watermark
+                    for f in pd.get("files", []):
+                        if f.get("content_type", "").startswith("video/") and f.get("watermark_status") in ("pending", "failed", None):
+                            background_tasks.add_task(
+                                process_watermark, project_id, pd["id"], f["id"],
+                                f["r2_key"], watermark_text, agency_id
+                            )
+        else:
+            # Toggling OFF: re-enable downloads on deliverables that were auto-disabled
+            for pd in portal_deliverables:
+                if pd.get("downloads_disabled"):
+                    has_video = any(f.get("content_type", "").startswith("video/") for f in pd.get("files", []))
+                    if has_video:
+                        await db.projects.update_one(
+                            {"_id": ObjectId(project_id), "portal_deliverables.id": pd["id"]},
+                            {"$set": {
+                                "portal_deliverables.$.downloads_disabled": False,
+                                "portal_deliverables.$.updated_on": now,
+                            }}
+                        )
+
+    return {"message": "Portal settings updated"}
+
+
+# --- Download Limits ---
+
+@router.patch("/{project_id}/deliverables/{deliverable_id}/download-settings")
+async def update_download_settings(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Set download limit and/or disable downloads for a deliverable."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    set_fields = {"portal_deliverables.$.updated_on": datetime.now(timezone.utc), "updated_on": datetime.now(timezone.utc)}
+    if "max_downloads" in body:
+        set_fields["portal_deliverables.$.max_downloads"] = body["max_downloads"]
+    if "downloads_disabled" in body:
+        set_fields["portal_deliverables.$.downloads_disabled"] = body["downloads_disabled"]
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+        {"$set": set_fields}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project or deliverable not found")
+
+    return {"message": "Download settings updated"}
+
+
+@router.post("/{project_id}/deliverables/{deliverable_id}/reset-downloads")
+async def reset_download_count(
+    project_id: str,
+    deliverable_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Reset download count to 0 for a deliverable."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+        {"$set": {
+            "portal_deliverables.$.download_count": 0,
+            "portal_deliverables.$.updated_on": datetime.now(timezone.utc),
+            "updated_on": datetime.now(timezone.utc),
+        }}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project or deliverable not found")
+
+    return {"message": "Download count reset"}
+
+
+# --- File Versioning ---
+
+@router.post("/{project_id}/deliverables/{deliverable_id}/files/{file_id}/replace")
+async def replace_file(
+    project_id: str,
+    deliverable_id: str,
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Replace a file with a new version. Old file is deleted from R2, metadata saved to history."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1, "agency_id": 1, "portal_watermark_enabled": 1, "portal_watermark_text": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    deliverable = next(
+        (d for d in project.get("portal_deliverables", []) if d["id"] == deliverable_id),
+        None
+    )
+    if not deliverable:
+        raise HTTPException(status_code=404, detail="Deliverable not found")
+
+    file_entry = next((f for f in deliverable.get("files", []) if f["id"] == file_id), None)
+    if not file_entry:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    from models.project import FileVersion
+
+    # Save current file metadata to version history
+    version_entry = FileVersion(
+        version=file_entry.get("version", 1),
+        file_name=file_entry["file_name"],
+        content_type=file_entry["content_type"],
+        uploaded_by=file_entry.get("uploaded_by"),
+        uploaded_on=file_entry.get("uploaded_on", datetime.now(timezone.utc)),
+        change_notes=body.get("change_notes", ""),
+    )
+
+    # Delete old file, thumbnail, and watermark from R2
+    delete_r2_object(file_entry["r2_key"])
+    if file_entry.get("thumbnail_r2_key"):
+        delete_r2_object(file_entry["thumbnail_r2_key"])
+    if file_entry.get("watermark_r2_key"):
+        delete_r2_object(file_entry["watermark_r2_key"])
+
+    new_version = file_entry.get("version", 1) + 1
+    content_type = body.get("content_type", "application/octet-stream")
+    is_image = content_type.startswith("image/")
+    is_video = content_type.startswith("video/")
+    now = datetime.now(timezone.utc)
+
+    # Update file with new data using array filters
+    update_fields = {
+        "portal_deliverables.$[d].files.$[f].file_name": body["file_name"],
+        "portal_deliverables.$[d].files.$[f].content_type": content_type,
+        "portal_deliverables.$[d].files.$[f].r2_key": body["r2_key"],
+        "portal_deliverables.$[d].files.$[f].r2_url": body["r2_url"],
+        "portal_deliverables.$[d].files.$[f].uploaded_on": now,
+        "portal_deliverables.$[d].files.$[f].version": new_version,
+        "portal_deliverables.$[d].files.$[f].thumbnail_r2_key": None,
+        "portal_deliverables.$[d].files.$[f].thumbnail_r2_url": None,
+        "portal_deliverables.$[d].files.$[f].thumbnail_status": "pending" if (is_image or is_video) else "n/a",
+        "portal_deliverables.$[d].files.$[f].watermark_r2_key": None,
+        "portal_deliverables.$[d].files.$[f].watermark_r2_url": None,
+        "portal_deliverables.$[d].files.$[f].watermark_status": "pending" if is_video else "n/a",
+        "updated_on": now,
+    }
+
+    await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {
+            "$set": update_fields,
+            "$push": {"portal_deliverables.$[d].files.$[f].previous_versions": version_entry.model_dump()},
+        },
+        array_filters=[{"d.id": deliverable_id}, {"f.id": file_id}],
+    )
+
+    # Optionally reset download count
+    if body.get("reset_downloads"):
+        await db.projects.update_one(
+            {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+            {"$set": {"portal_deliverables.$.download_count": 0}}
+        )
+
+    # Queue thumbnail/watermark processing
+    agency_id = project.get("agency_id", "default")
+    if is_image or is_video:
+        from services.media_processing import process_thumbnail, process_watermark
+        background_tasks.add_task(process_thumbnail, project_id, deliverable_id, file_id, body["r2_key"], content_type, agency_id)
+        if is_video and project.get("portal_watermark_enabled"):
+            watermark_text = project.get("portal_watermark_text") or "Protected"
+            background_tasks.add_task(process_watermark, project_id, deliverable_id, file_id, body["r2_key"], watermark_text, agency_id)
+
+    return {"message": "File replaced", "version": new_version}
+
+
+@router.get("/{project_id}/deliverables/{deliverable_id}/files/{file_id}/versions")
+async def get_file_versions(
+    project_id: str,
+    deliverable_id: str,
+    file_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Get version history for a file (metadata only, no download links)."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    deliverable = next(
+        (d for d in project.get("portal_deliverables", []) if d["id"] == deliverable_id),
+        None
+    )
+    if not deliverable:
+        raise HTTPException(status_code=404, detail="Deliverable not found")
+
+    file_entry = next((f for f in deliverable.get("files", []) if f["id"] == file_id), None)
+    if not file_entry:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return {
+        "current_version": file_entry.get("version", 1),
+        "previous_versions": file_entry.get("previous_versions", []),
+    }
+
+
+@router.post("/{project_id}/deliverables/{deliverable_id}/files/{file_id}/watermark")
+async def toggle_file_watermark(
+    project_id: str,
+    deliverable_id: str,
+    file_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Enable or disable visual watermark overlay on a specific video file."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    enabled = body.get("enabled", True)
+    watermark_text = body.get("watermark_text")
+
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    deliverable = next(
+        (d for d in project.get("portal_deliverables", []) if d["id"] == deliverable_id), None
+    )
+    if not deliverable:
+        raise HTTPException(status_code=404, detail="Deliverable not found")
+
+    file_entry = next((f for f in deliverable.get("files", []) if f["id"] == file_id), None)
+    if not file_entry:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    new_status = "done" if enabled else "n/a"
+    update_fields = {"portal_deliverables.$[d].files.$[f].watermark_status": new_status}
+
+    # Persist watermark text at project level when enabling
+    if enabled and watermark_text:
+        await db.projects.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$set": {"portal_watermark_text": watermark_text.strip()}},
+        )
+
+    await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$set": update_fields},
+        array_filters=[{"d.id": deliverable_id}, {"f.id": file_id}],
+    )
+    return {"message": "Watermark enabled" if enabled else "Watermark removed"}
+
+
+# --- Portal Analytics ---
+
+@router.get("/{project_id}/portal-analytics")
+async def get_portal_analytics(
+    project_id: str,
+    days: int = Query(default=30, ge=1, le=365),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Get portal analytics for a project."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    from database import portal_analytics_collection
+    from datetime import timedelta
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    cursor = portal_analytics_collection.find({
+        "project_id": project_id,
+        "timestamp": {"$gte": since},
+    }).sort("timestamp", -1)
+
+    events = await cursor.to_list(length=10000)
+
+    total_visits = sum(1 for e in events if e.get("event_type") == "visit")
+    unique_ips = len(set(e.get("ip_address") for e in events if e.get("event_type") == "visit" and e.get("ip_address")))
+    total_downloads = sum(1 for e in events if e.get("event_type") == "file_download")
+
+    # Build deliverable id -> title lookup from project
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    deliverable_title_map = {
+        d["id"]: d.get("title", d["id"])
+        for d in (project or {}).get("portal_deliverables", [])
+    }
+
+    # Per-deliverable download counts keyed by title
+    deliverable_downloads = {}
+    for e in events:
+        if e.get("event_type") == "file_download" and e.get("deliverable_id"):
+            did = e["deliverable_id"]
+            label = deliverable_title_map.get(did, did)
+            deliverable_downloads[label] = deliverable_downloads.get(label, 0) + 1
+
+    # Recent activity (last 10)
+    recent = []
+    for e in events[:10]:
+        recent.append({
+            "event_type": e.get("event_type"),
+            "deliverable_id": e.get("deliverable_id"),
+            "deliverable_title": deliverable_title_map.get(e.get("deliverable_id"), e.get("deliverable_id")),
+            "file_name": e.get("file_name"),
+            "timestamp": e.get("timestamp"),
+            "ip_address": e.get("ip_address"),
+        })
+
+    # Timeline: group by date
+    timeline = {}
+    for e in events:
+        date_str = e.get("timestamp").strftime("%Y-%m-%d") if e.get("timestamp") else "unknown"
+        if date_str not in timeline:
+            timeline[date_str] = {"date": date_str, "visits": 0, "downloads": 0}
+        if e.get("event_type") == "visit":
+            timeline[date_str]["visits"] += 1
+        elif e.get("event_type") == "file_download":
+            timeline[date_str]["downloads"] += 1
+
+    return {
+        "total_visits": total_visits,
+        "unique_visitors": unique_ips,
+        "total_downloads": total_downloads,
+        "deliverable_downloads": deliverable_downloads,
+        "timeline": sorted(timeline.values(), key=lambda x: x["date"]),
+        "recent_activity": recent,
+    }

@@ -98,19 +98,26 @@ def setup_logging():
     root_logger.addHandler(console_handler)
 
     # --- File Handler (Rotating) ---
-    log_dir = os.path.join(os.path.dirname(__file__), "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "app.log")
+    # Only enable in development or when LOG_TO_FILE=true.
+    # In production Docker, stdout → Docker json-file driver → Promtail → Loki.
+    log_to_file = os.getenv("LOG_TO_FILE", "").lower() == "true"
+    if env == "development" or log_to_file:
+        log_dir = os.path.join(os.path.dirname(__file__), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "app.log")
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.INFO)  # File always gets INFO+
-    file_handler.setFormatter(JSONFormatter())  # File always JSON
-    root_logger.addHandler(file_handler)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.INFO)  # File always gets INFO+
+        file_handler.setFormatter(JSONFormatter())  # File always JSON
+        root_logger.addHandler(file_handler)
+        log_file_info = log_file
+    else:
+        log_file_info = "disabled (stdout only)"
 
     # Silence noisy third-party loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -120,7 +127,7 @@ def setup_logging():
 
     # Startup log
     app_logger = logging.getLogger("yugenhub")
-    app_logger.info(f"Logging initialized | env={env} level={log_level} file={log_file}")
+    app_logger.info(f"Logging initialized | env={env} level={log_level} file={log_file_info}")
 
 
 def get_logger(name: str) -> logging.Logger:

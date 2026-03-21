@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Literal, Any
+from typing import Optional, Literal, Any, List
 from datetime import datetime, timezone
 import uuid
 
@@ -31,6 +31,8 @@ class TaskModel(BaseModel):
     # Relations
     project_id: Optional[str] = None  # Required if type='project'
     event_id: Optional[str] = None    # Optional: Linked to a specific event
+    deliverable_id: Optional[str] = None  # FK → DeliverableModel.id (event deliverable spec)
+    portal_deliverable_ids: List[str] = Field(default_factory=list)  # FK → PortalDeliverableModel.id(s)
     studio_id: str = "default_agency" # agency_id
     
     # State
