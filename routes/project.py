@@ -466,7 +466,7 @@ async def list_projects(
             if sort == "upcoming":
                 nows = datetime.now(timezone.utc)
                 future_events = [parse_event_date(e.get("start_date")) for e in p.get("events", [])]
-                return min(future_dates) if future_dates else datetime(9999, 12, 31, tzinfo=timezone.utc)
+                return min(future_events) if future_events else datetime(9999, 12, 31, tzinfo=timezone.utc)
             
             val = p.get("created_on")
             if isinstance(val, datetime):
@@ -643,8 +643,22 @@ async def delete_event(project_id: str, event_id: str, background_tasks: Backgro
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
     
+    # Collect task IDs before deletion so portal_deliverables can be cascaded
+    event_tasks = await db.tasks.find(
+        {"event_id": event_id, "project_id": project_id},
+        {"id": 1}
+    ).to_list(None)
+    event_task_ids = [t.get("id") for t in event_tasks if t.get("id")]
+
     # Cascade Delete Tasks linked to this Event
     await db.tasks.delete_many({"event_id": event_id, "project_id": project_id})
+
+    # Remove orphaned portal deliverables for those tasks
+    if event_task_ids:
+        await db.projects.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$pull": {"portal_deliverables": {"task_id": {"$in": event_task_ids}}}}
+        )
 
     # Get the event first to check for calendar_event_id
     project_doc = await db.projects.find_one({"_id": ObjectId(project_id)})
@@ -824,26 +838,29 @@ async def add_event_to_project(
     new_tasks = []
     if event.deliverables:
         for deliverable in event.deliverables:
-            # Create a Task for this deliverable
             task = TaskModel(
                 title=f"{deliverable.type} ({event.type})",
                 description=f"Deliverable for {event.type}",
                 project_id=project_id,
                 event_id=event.id,
-                # Store link to deliverable if needed in metadata
-                status="todo", # Default
+                deliverable_id=deliverable.id,
+                status="todo",
                 priority="medium",
                 due_date=deliverable.due_date,
                 assigned_to=deliverable.incharge_id,
-                studio_id=current_user.agency_id, # ScopedDB enforces this anyway
+                studio_id=current_user.agency_id,
                 created_by=current_user.id,
                 type="project",
-                category="deliverable"
+                category="deliverable",
+                quantity=deliverable.quantity,
             )
             new_tasks.append(task.model_dump())
-            
+
         if new_tasks:
             await db.tasks.insert_many(new_tasks)
+            # Auto-create portal deliverables for each task (same as create_project)
+            for task_dict in new_tasks:
+                await on_deliverable_task_created(db, task_dict, project_id)
             logger.info(f"Created tasks from deliverables", extra={"data": {"count": len(new_tasks), "event_type": event.type, "project_id": project_id}})
 
     return {"message": "Event added successfully", "calendar_synced": calendar_synced}
@@ -918,7 +935,14 @@ async def update_event(
     """UPDATE: Update a specific event within a project"""
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
-        
+
+    # Whitelist allowed event fields to prevent arbitrary field injection
+    ALLOWED_EVENT_FIELDS = {
+        "type", "title", "start_date", "end_date", "venue_name", "venue_location",
+        "notes", "assignments", "deliverables", "color", "is_confirmed"
+    }
+    update_data = {k: v for k, v in update_data.items() if k in ALLOWED_EVENT_FIELDS}
+
     old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
     if not old_project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -927,17 +951,8 @@ async def update_event(
     if not old_event:
         raise HTTPException(status_code=404, detail="Event not found")
         
-    needs_calendar_sync = False
-    if not old_event.get("calendar_event_id"):
-        needs_calendar_sync = True
-    else:
-        for field in ["type", "start_date", "end_date"]:
-            if field in update_data:
-                old_val = str(old_event.get(field, ""))
-                new_val = str(update_data.get(field, ""))
-                if old_val != new_val:
-                    needs_calendar_sync = True
-                    break
+    # Always sync to calendar on any edit — ensures n8n stays consistent
+    needs_calendar_sync = True
 
     # If deliverables are being updated, sync to Tasks using deliverable_id FK
     if "deliverables" in update_data:
@@ -1338,6 +1353,48 @@ async def sync_deliverables_from_events(
 
     result = await reconcile_project(db, project_id)
     return result
+
+
+@router.post("/admin/backfill-portal-deliverables")
+async def backfill_all_portal_deliverables(
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """
+    One-time backfill: run reconcile_project across every project for this agency.
+    Safe to call multiple times — only creates missing portal deliverables.
+    Returns per-project results and totals.
+    """
+    if current_user.get("role") not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    projects = await db.projects.find({}, {"_id": 1}).to_list(length=None)
+    results = []
+    total_created = 0
+    total_removed = 0
+
+    for p in projects:
+        project_id = str(p["_id"])
+        try:
+            result = await reconcile_project(db, project_id)
+            total_created += result.get("created", 0)
+            total_removed += result.get("removed", 0)
+            if result.get("created") or result.get("removed"):
+                results.append({"project_id": project_id, **result})
+        except Exception as e:
+            logger.error(f"Backfill failed for project {project_id}: {e}")
+            results.append({"project_id": project_id, "error": str(e)})
+
+    logger.info(
+        "Portal deliverable backfill complete",
+        extra={"data": {"projects_scanned": len(projects), "created": total_created, "removed": total_removed}}
+    )
+    return {
+        "projects_scanned": len(projects),
+        "total_created": total_created,
+        "total_removed": total_removed,
+        "details": results,
+    }
 
 
 @router.post("/{project_id}/deliverables")

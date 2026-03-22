@@ -93,7 +93,7 @@ async def sync_event_to_calendar(
             response = await client.post(
                 WEBHOOK_URL,
                 json=payload,
-                timeout=3.0
+                timeout=5.0
             )
             response.raise_for_status()
             
@@ -158,7 +158,7 @@ async def sync_attendee_to_calendar(
             response = await client.post(
                 WEBHOOK_URL,
                 json=payload,
-                timeout=3.0
+                timeout=5.0
             )
             response.raise_for_status()
             logger.info(f"Successfully synced calendar attendee action '{action}' for event {calendar_event_id}")
