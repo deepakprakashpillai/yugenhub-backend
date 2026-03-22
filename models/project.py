@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 
@@ -29,6 +29,12 @@ class EventModel(BaseModel):
     deliverables: List[DeliverableModel] = Field(default_factory=list)
     assignments: List[AssignmentModel] = Field(default_factory=list)
     notes: str = ""
+
+    @model_validator(mode='after')
+    def validate_date_order(self):
+        if self.end_date and self.start_date and self.end_date <= self.start_date:
+            raise ValueError('end_date must be after start_date')
+        return self
 
 class FeedbackEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
