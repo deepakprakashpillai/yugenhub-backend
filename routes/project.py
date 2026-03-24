@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel, PortalDeliverableModel, FeedbackEntry, DeliverableFile
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
-from routes.deps import get_current_user, get_db, get_user_verticals
+from routes.deps import get_current_user, get_db, get_user_verticals, require_role
 from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from fastapi import Depends
@@ -943,6 +943,15 @@ async def update_event(
     }
     update_data = {k: v for k, v in update_data.items() if k in ALLOWED_EVENT_FIELDS}
 
+    # Convert date strings to proper datetime objects so they're stored as BSON Dates.
+    # Without this, date comparison queries (e.g. dashboard schedule) silently skip events.
+    for date_field in ("start_date", "end_date"):
+        if date_field in update_data and update_data[date_field]:
+            try:
+                update_data[date_field] = datetime.fromisoformat(update_data[date_field])
+            except (ValueError, TypeError):
+                pass
+
     old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
     if not old_project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1355,46 +1364,111 @@ async def sync_deliverables_from_events(
     return result
 
 
-@router.post("/admin/backfill-portal-deliverables")
-async def backfill_all_portal_deliverables(
-    current_user: UserModel = Depends(get_current_user),
+@router.post("/admin/revalidate-all")
+async def revalidate_all_projects(
+    current_user: UserModel = Depends(require_role("owner", "admin")),
     db: ScopedDatabase = Depends(get_db)
 ):
     """
-    One-time backfill: run reconcile_project across every project for this agency.
-    Safe to call multiple times — only creates missing portal deliverables.
-    Returns per-project results and totals.
+    Full data revalidation across every project for this agency. Safe to run multiple times.
+    Fixes:
+      1. Event start_date / end_date stored as strings (converts to proper BSON Dates)
+      2. Deliverable due_date stored as strings inside event subdocuments
+      3. Missing deliverable tasks for event deliverables that were never synced
+      4. Portal deliverable count mismatches (creates missing, removes empty excess)
     """
-    if current_user.get("role") not in ("owner", "admin"):
-        raise HTTPException(status_code=403, detail="Forbidden")
+    projects = await db.projects.find({}).to_list(length=None)
 
-    projects = await db.projects.find({}, {"_id": 1}).to_list(length=None)
-    results = []
-    total_created = 0
-    total_removed = 0
-
-    for p in projects:
-        project_id = str(p["_id"])
-        try:
-            result = await reconcile_project(db, project_id)
-            total_created += result.get("created", 0)
-            total_removed += result.get("removed", 0)
-            if result.get("created") or result.get("removed"):
-                results.append({"project_id": project_id, **result})
-        except Exception as e:
-            logger.error(f"Backfill failed for project {project_id}: {e}")
-            results.append({"project_id": project_id, "error": str(e)})
-
-    logger.info(
-        "Portal deliverable backfill complete",
-        extra={"data": {"projects_scanned": len(projects), "created": total_created, "removed": total_removed}}
-    )
-    return {
+    stats = {
         "projects_scanned": len(projects),
-        "total_created": total_created,
-        "total_removed": total_removed,
-        "details": results,
+        "event_dates_fixed": 0,
+        "tasks_created": 0,
+        "portal_deliverables_created": 0,
+        "portal_deliverables_removed": 0,
+        "errors": 0,
     }
+
+    for project in projects:
+        project_id = str(project["_id"])
+        try:
+            events = project.get("events", [])
+
+            # --- 1. Fix string dates in events and their deliverables ---
+            date_patches = {}
+            for i, event in enumerate(events):
+                for date_field in ("start_date", "end_date"):
+                    val = event.get(date_field)
+                    if isinstance(val, str) and val:
+                        try:
+                            parsed = datetime.fromisoformat(val)
+                            date_patches[f"events.{i}.{date_field}"] = parsed
+                            event[date_field] = parsed  # keep in-memory copy consistent
+                            stats["event_dates_fixed"] += 1
+                        except ValueError:
+                            pass
+                for j, deliv in enumerate(event.get("deliverables", [])):
+                    due = deliv.get("due_date")
+                    if isinstance(due, str) and due:
+                        try:
+                            parsed = datetime.fromisoformat(due)
+                            date_patches[f"events.{i}.deliverables.{j}.due_date"] = parsed
+                            stats["event_dates_fixed"] += 1
+                        except ValueError:
+                            pass
+
+            if date_patches:
+                await db.projects.update_one(
+                    {"_id": ObjectId(project_id)},
+                    {"$set": date_patches}
+                )
+
+            # --- 2. Ensure a deliverable task exists for every event deliverable ---
+            existing_tasks = await db.tasks.find({
+                "project_id": project_id,
+                "category": "deliverable",
+            }).to_list(length=None)
+            synced_deliverable_ids = {t.get("deliverable_id") for t in existing_tasks if t.get("deliverable_id")}
+
+            new_tasks = []
+            for event in events:
+                for deliv in event.get("deliverables", []):
+                    deliv_id = deliv.get("id")
+                    if not deliv_id or deliv_id in synced_deliverable_ids:
+                        continue
+                    task = TaskModel(
+                        title=f"{deliv.get('type', 'Deliverable')} ({event.get('type', 'Event')})",
+                        description=f"Deliverable for {event.get('type', 'Event')}",
+                        project_id=project_id,
+                        event_id=event.get("id"),
+                        deliverable_id=deliv_id,
+                        status="todo",
+                        priority="medium",
+                        due_date=deliv.get("due_date"),
+                        assigned_to=deliv.get("incharge_id"),
+                        studio_id=project.get("agency_id"),
+                        type="project",
+                        category="deliverable",
+                        quantity=deliv.get("quantity", 1),
+                    )
+                    new_tasks.append(task.model_dump())
+                    stats["tasks_created"] += 1
+
+            if new_tasks:
+                await db.tasks.insert_many(new_tasks)
+                for task_dict in new_tasks:
+                    await on_deliverable_task_created(db, task_dict, project_id)
+
+            # --- 3. Reconcile portal deliverables ---
+            reconcile_result = await reconcile_project(db, project_id)
+            stats["portal_deliverables_created"] += reconcile_result.get("created", 0)
+            stats["portal_deliverables_removed"] += reconcile_result.get("removed", 0)
+
+        except Exception as e:
+            logger.error(f"Revalidation failed for project {project_id}: {e}")
+            stats["errors"] += 1
+
+    logger.info("Full project revalidation complete", extra={"data": stats})
+    return stats
 
 
 @router.post("/{project_id}/deliverables")
