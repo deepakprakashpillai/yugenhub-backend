@@ -257,21 +257,32 @@ async def get_project_team(
 ):
     """Token-saver: Fetch only event names, dates, and assigned associates."""
     query = {"_id": ObjectId(identifier)} if ObjectId.is_valid(identifier) else {"code": _normalise_code(identifier)}
-    project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.start_date": 1, "events.assignments": 1})
-    
+    project = await db.projects.find_one(query, {"code": 1, "events.type": 1, "events.start_date": 1, "events.assignments": 1, "events.team_requirements": 1})
+
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-        
+
     team_info = []
     for evt in project.get("events", []):
         start = evt.get("start_date").isoformat() if isinstance(evt.get("start_date"), datetime) else str(evt.get("start_date") or "TBD")
-        assignments = [{"name": a.get("associate_name", "Unknown"), "role": a.get("role", "Unknown")} for a in evt.get("assignments", [])]
-        team_info.append({
+        assignments = [
+            {
+                "name": a.get("associate_name", "Unknown"),
+                "role": a.get("role", "Unknown"),
+                "tags": a.get("tags", [])
+            }
+            for a in evt.get("assignments", [])
+        ]
+        team_req = [{"role": r.get("role"), "count": r.get("count")} for r in evt.get("team_requirements", [])]
+        entry = {
             "event": evt.get("type", "Unknown Event"),
             "date": start,
             "team": assignments
-        })
-        
+        }
+        if team_req:
+            entry["team_requirements"] = team_req
+        team_info.append(entry)
+
     return {"project_code": project.get("code"), "schedule_team": team_info}
 
 @router.get("/projects/{identifier}/schedule")
