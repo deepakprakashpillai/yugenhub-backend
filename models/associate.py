@@ -12,7 +12,7 @@ class AssociateModel(BaseModel):
     phone_number: str
     email_id: Optional[EmailStr] = None
     base_city: Optional[str] = "Not Set"
-    primary_role: Literal['Photographer', 'Cinematographer', 'Editor', 'Drone Pilot', 'Lead', 'Assistant']
+    primary_role: str
     employment_type: Literal['In-house', 'Freelance', 'Contract'] = 'Freelance'
     is_active: bool = True
     linked_user_id: Optional[str] = None
