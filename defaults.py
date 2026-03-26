@@ -34,6 +34,17 @@ DEFAULT_AGENCY_CONFIG = {
     "finance_categories": [
         # Income Categories
         {
+            "id": "project_payment",
+            "name": "Project Payment",
+            "type": "income",
+            "subcategories": [
+                {"id": "advance", "name": "Advance"},
+                {"id": "partial", "name": "Partial"},
+                {"id": "settlement", "name": "Settlement"},
+                {"id": "bonus", "name": "Bonus"}
+            ]
+        },
+        {
             "id": "sales",
             "name": "Sales",
             "type": "income",
