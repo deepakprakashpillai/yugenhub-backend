@@ -29,6 +29,10 @@ class Vertical(BaseModel):
     card_fields: List[str] = []  # field names to show as badges on project cards
     table_fields: List[str] = []  # field names to show as extra columns in table view
 
+    # Team config (only used when has_events=True)
+    assignment_tags: List[str] = []  # vertical-specific tags for event assignments
+    team_requirements: List[Dict[str, Any]] = []  # default crew plan [{role, count}]
+
 
 class SubCategory(BaseModel):
     id: str

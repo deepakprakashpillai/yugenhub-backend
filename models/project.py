@@ -17,6 +17,11 @@ class AssignmentModel(BaseModel):
     associate_id: str
     associate_name: Optional[str] = None
     role: str
+    tags: List[str] = Field(default_factory=list)
+
+class TeamRequirement(BaseModel):
+    role: str
+    count: int = 0
 
 class EventModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -28,6 +33,7 @@ class EventModel(BaseModel):
     calendar_event_id: Optional[str] = None
     deliverables: List[DeliverableModel] = Field(default_factory=list)
     assignments: List[AssignmentModel] = Field(default_factory=list)
+    team_requirements: List[TeamRequirement] = Field(default_factory=list)
     notes: str = ""
 
     @model_validator(mode='after')
