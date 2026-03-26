@@ -955,7 +955,7 @@ async def update_event(
     # Whitelist allowed event fields to prevent arbitrary field injection
     ALLOWED_EVENT_FIELDS = {
         "type", "title", "start_date", "end_date", "venue_name", "venue_location",
-        "notes", "assignments", "deliverables", "color", "is_confirmed"
+        "notes", "assignments", "deliverables", "color", "is_confirmed", "team_requirements"
     }
     update_data = {k: v for k, v in update_data.items() if k in ALLOWED_EVENT_FIELDS}
 

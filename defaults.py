@@ -117,7 +117,9 @@ DEFAULT_AGENCY_CONFIG = {
                 {"name": "bride_number", "label": "Bride Contact", "type": "tel", "options": []},
                 {"name": "wedding_date", "label": "Wedding Date", "type": "date", "options": []},
             ],
-            "event_fields": []
+            "event_fields": [],
+            "assignment_tags": [],
+            "team_requirements": []
         },
         {
             "id": "pluto",
@@ -133,7 +135,9 @@ DEFAULT_AGENCY_CONFIG = {
                 {"name": "child_age", "label": "Age", "type": "number", "options": []},
                 {"name": "occasion_type", "label": "Occasion", "type": "select", "options": ["Birthday", "Baptism", "Newborn", "Other"]},
             ],
-            "event_fields": []
+            "event_fields": [],
+            "assignment_tags": [],
+            "team_requirements": []
         },
         {
             "id": "festia",
@@ -149,7 +153,9 @@ DEFAULT_AGENCY_CONFIG = {
                 {"name": "company_name", "label": "Company Name", "type": "text", "options": []},
                 {"name": "event_name", "label": "Event Name", "type": "text", "options": []},
             ],
-            "event_fields": []
+            "event_fields": [],
+            "assignment_tags": [],
+            "team_requirements": []
         },
         {
             "id": "thryv",
@@ -163,7 +169,9 @@ DEFAULT_AGENCY_CONFIG = {
             "fields": [
                 {"name": "service_type", "label": "Service", "type": "text", "options": []},
             ],
-            "event_fields": []
+            "event_fields": [],
+            "assignment_tags": [],
+            "team_requirements": []
         },
     ],
 }
