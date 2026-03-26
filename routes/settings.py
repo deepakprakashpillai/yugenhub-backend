@@ -34,10 +34,6 @@ async def get_or_create_config(db: ScopedDatabase) -> dict:
     if not config:
         # Seed with defaults
         new_config = copy.deepcopy(DEFAULT_AGENCY_CONFIG)
-        # agency_id is NOT auto-injected on insert_one IF we just pass dict. 
-        # But wait, ScopedCollection.insert_one DOES inject agency_id if not present??
-        # Checked middleware: `insert_one` -> `_inject_scope`.
-        # So we don't strictly need to add it, but explicit is fine.
         new_config["agency_id"] = db.agency_id
         await db.agency_configs.insert_one(new_config)
         config = await db.agency_configs.find_one({})
@@ -670,6 +666,55 @@ async def update_finance_categories(
     return {"message": "Finance categories updated"}
 
 
+# ─── SEED DEFAULTS ──────────────────────────────────────────────────────────
+
+# Human-readable labels for the result summary
+_FIELD_LABELS = {
+    "finance_categories": "Finance Categories",
+    "lead_sources": "Lead Sources",
+    "deliverable_types": "Deliverable Types",
+    "associate_roles": "Associate Roles",
+    "status_options": "Project Statuses",
+}
+
+_SEEDABLE_FIELDS = list(_FIELD_LABELS.keys())
+
+@router.post("/seed-defaults")
+async def seed_defaults(
+    current_user: UserModel = Depends(require_role("owner")),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """
+    For each config array, if it is empty seed it with defaults.
+    If it already has any items, skip it entirely — never overwrites existing data.
+    """
+    config = await db.agency_configs.find_one({})
+    if not config:
+        new_config = copy.deepcopy(DEFAULT_AGENCY_CONFIG)
+        new_config["agency_id"] = db.agency_id
+        await db.agency_configs.insert_one(new_config)
+        logger.info("Seeded full default config (was missing)", extra={"data": {"agency_id": db.agency_id}})
+        return {"seeded": list(_FIELD_LABELS.values()), "skipped": []}
+
+    seeded = []
+    skipped = []
+    updates = {}
+
+    for field in _SEEDABLE_FIELDS:
+        existing = config.get(field, [])
+        if not existing:
+            updates[field] = copy.deepcopy(DEFAULT_AGENCY_CONFIG[field])
+            seeded.append(_FIELD_LABELS[field])
+        else:
+            skipped.append(_FIELD_LABELS[field])
+
+    if updates:
+        await db.agency_configs.update_one({}, {"$set": updates})
+        logger.info("Seeded defaults for empty config fields", extra={"data": {"agency_id": db.agency_id, "fields": seeded}})
+
+    return {"seeded": seeded, "skipped": skipped}
+
+
 # ─── NOTIFICATION PREFERENCES ───────────────────────────────────────────────
 
 NOTIFICATION_PREFS_COLLECTION = "notification_prefs"
@@ -776,6 +821,17 @@ async def update_account(
         raise HTTPException(status_code=400, detail="Name cannot be empty")
 
     await db.users.update_one({"id": current_user.id}, {"$set": filtered})
+
+    # Sync to linked associate record (field names differ between collections)
+    associate_sync = {}
+    if "phone" in filtered:
+        associate_sync["phone_number"] = filtered["phone"]
+    if associate_sync:
+        await db.associates.update_one(
+            {"linked_user_id": current_user.id},
+            {"$set": associate_sync}
+        )
+
     logger.info(
         f"Account updated",
         extra={"data": {"user_id": current_user.id, "fields": list(filtered.keys())}}
