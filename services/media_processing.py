@@ -2,7 +2,7 @@
 
 from logging_config import get_logger
 from utils.r2 import download_r2_object, upload_r2_object, delete_r2_object
-from utils.media import generate_thumbnail, generate_video_thumbnail, apply_video_watermark
+from utils.media import generate_thumbnail, generate_preview, generate_video_thumbnail, apply_video_watermark
 from database import projects_collection
 from config import config
 
@@ -21,15 +21,26 @@ async def _update_file_field(project_id: str, deliverable_id: str, file_id: str,
 
 
 async def process_thumbnail(project_id: str, deliverable_id: str, file_id: str, r2_key: str, content_type: str, agency_id: str):
-    """Async background task: download file, generate thumbnail, upload, update DB."""
+    """Async background task: download file, generate thumbnail + preview (images), upload, update DB.
+
+    For images: generates both a 400x400 thumbnail AND a 1920px preview in one pass (single R2 download).
+    For videos: generates thumbnail only.
+    """
     thumb_r2_key = f"thumbnails/{agency_id}/{project_id}/{file_id}.jpg"
+    preview_r2_key = f"previews/{agency_id}/{project_id}/{file_id}.jpg"
+    is_image = content_type.startswith("image/")
+
     try:
-        await _update_file_field(project_id, deliverable_id, file_id, {"thumbnail_status": "processing"})
+        initial_updates = {"thumbnail_status": "processing"}
+        if is_image:
+            initial_updates["preview_status"] = "processing"
+        await _update_file_field(project_id, deliverable_id, file_id, initial_updates)
 
-        file_bytes = download_r2_object(r2_key)
+        file_bytes = download_r2_object(r2_key)  # Single download for all derived assets
 
-        if content_type.startswith("image/"):
+        if is_image:
             thumb_bytes = generate_thumbnail(file_bytes, content_type)
+            preview_bytes = generate_preview(file_bytes, content_type)
         elif content_type.startswith("video/"):
             thumb_bytes = generate_video_thumbnail(file_bytes)
         else:
@@ -38,16 +49,30 @@ async def process_thumbnail(project_id: str, deliverable_id: str, file_id: str, 
         upload_r2_object(thumb_r2_key, thumb_bytes, "image/jpeg")
         thumb_url = f"{config.R2_PUBLIC_URL}/{thumb_r2_key}" if config.R2_PUBLIC_URL else thumb_r2_key
 
-        await _update_file_field(project_id, deliverable_id, file_id, {
+        updates = {
             "thumbnail_r2_key": thumb_r2_key,
             "thumbnail_r2_url": thumb_url,
             "thumbnail_status": "done",
-        })
-        logger.info(f"Thumbnail generated for file {file_id}")
+        }
+
+        if is_image:
+            upload_r2_object(preview_r2_key, preview_bytes, "image/jpeg")
+            preview_url = f"{config.R2_PUBLIC_URL}/{preview_r2_key}" if config.R2_PUBLIC_URL else preview_r2_key
+            updates.update({
+                "preview_r2_key": preview_r2_key,
+                "preview_r2_url": preview_url,
+                "preview_status": "done",
+            })
+
+        await _update_file_field(project_id, deliverable_id, file_id, updates)
+        logger.info(f"Thumbnail{'+ preview ' if is_image else ' '}generated for file {file_id}")
 
     except Exception as e:
         logger.error(f"Thumbnail generation failed for file {file_id}: {e}")
-        await _update_file_field(project_id, deliverable_id, file_id, {"thumbnail_status": "failed"})
+        fail_updates = {"thumbnail_status": "failed"}
+        if is_image:
+            fail_updates["preview_status"] = "failed"
+        await _update_file_field(project_id, deliverable_id, file_id, fail_updates)
 
 
 async def process_watermark(project_id: str, deliverable_id: str, file_id: str, r2_key: str, watermark_text: str, agency_id: str):

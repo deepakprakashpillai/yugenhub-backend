@@ -22,7 +22,7 @@ async def update_account_balance(db: ScopedDatabase, account_id: str, amount: fl
     inc_amount = 0.0
     if transaction_type == "income":
         inc_amount = amount
-    elif transaction_type == "expense":
+    elif transaction_type == "expense" or transaction_type == "transfer":
         inc_amount = -amount
 
     if inc_amount != 0:
@@ -202,7 +202,7 @@ async def update_invoice(invoice_id: str, invoice_data: InvoiceModel, db: Scoped
     if invoice_data.status in ["sent", "partially_paid", "paid"]:
          await update_client_ledger(db, invoice_data.client_id, invoice_data.total_amount, "invoice_created")
 
-    return {**invoice_data.model_dump(), "id": invoice_id}
+    return {**invoice_data.model_dump(), "id": invoice_id, "created_at": old_invoice.get("created_at")}
 
 @router.post("/invoices/{invoice_id}/status")
 async def update_invoice_status(invoice_id: str, body: dict = Body(...), db: ScopedDatabase = Depends(get_db)):
