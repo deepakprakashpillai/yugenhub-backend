@@ -67,6 +67,10 @@ class DeliverableFile(BaseModel):
     watermark_r2_key: Optional[str] = None
     watermark_r2_url: Optional[str] = None
     watermark_status: str = "pending"  # pending | processing | done | failed | n/a
+    # Preview fields (1920px JPEG for gallery — images only)
+    preview_r2_key: Optional[str] = None
+    preview_r2_url: Optional[str] = None
+    preview_status: str = "n/a"  # pending | processing | done | failed | n/a
     # Versioning fields
     version: int = 1
     previous_versions: List[FileVersion] = Field(default_factory=list)

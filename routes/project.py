@@ -387,13 +387,29 @@ async def list_projects(
         query.update(base_status_filter)
 
     if search:
-        # Case-insensitive regex search on title, code, or client name
-        regex_pattern = {"$regex": search, "$options": "i"}
-        query["$or"] = [
+        # Case-insensitive regex search on title, code, client name, and metadata fields
+        escaped_search = re.escape(search)
+        regex_pattern = {"$regex": escaped_search, "$options": "i"}
+        search_conditions = [
             {"title": regex_pattern},
             {"code": regex_pattern},
             {"metadata.client_name": regex_pattern}
         ]
+        # Also search common metadata fields used in title templates (e.g. groom_name, bride_name, kid_name)
+        # Fetch vertical configs to find all metadata field names
+        try:
+            agency_config = await db.agency_configs.find_one({})
+            if agency_config:
+                metadata_field_names = set()
+                for v in agency_config.get("verticals", []):
+                    for field in v.get("fields", []):
+                        metadata_field_names.add(field.get("name"))
+                for field_name in metadata_field_names:
+                    if field_name and field_name != "client_name":  # Already covered above
+                        search_conditions.append({f"metadata.{field_name}": regex_pattern})
+        except Exception:
+            pass  # Gracefully degrade if config fetch fails
+        query["$or"] = search_conditions
 
     # 2. Sorting & Pagination
     # Strategy: For 'upcoming', we need complex logic (finding min future date). 
@@ -1586,6 +1602,12 @@ async def delete_deliverable(
     if deliverable:
         for f in deliverable.get("files", []):
             delete_r2_object(f["r2_key"])
+            if f.get("thumbnail_r2_key"):
+                delete_r2_object(f["thumbnail_r2_key"])
+            if f.get("watermark_r2_key"):
+                delete_r2_object(f["watermark_r2_key"])
+            if f.get("preview_r2_key"):
+                delete_r2_object(f["preview_r2_key"])
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
@@ -1624,6 +1646,7 @@ async def add_file_to_deliverable(
         r2_url=body["r2_url"],
         thumbnail_status="pending" if (is_image or is_video) else "n/a",
         watermark_status="pending" if is_video else "n/a",
+        preview_status="pending" if is_image else "n/a",
     )
 
     now = datetime.now(timezone.utc)
@@ -1691,6 +1714,8 @@ async def delete_file_from_deliverable(
                 delete_r2_object(file_entry["thumbnail_r2_key"])
             if file_entry.get("watermark_r2_key"):
                 delete_r2_object(file_entry["watermark_r2_key"])
+            if file_entry.get("preview_r2_key"):
+                delete_r2_object(file_entry["preview_r2_key"])
 
     remaining_files = len([f for f in deliverable.get("files", []) if f["id"] != file_id]) if deliverable else 0
     now = datetime.now(timezone.utc)
@@ -1926,12 +1951,14 @@ async def replace_file(
         change_notes=body.get("change_notes", ""),
     )
 
-    # Delete old file, thumbnail, and watermark from R2
+    # Delete old file, thumbnail, watermark, and preview from R2
     delete_r2_object(file_entry["r2_key"])
     if file_entry.get("thumbnail_r2_key"):
         delete_r2_object(file_entry["thumbnail_r2_key"])
     if file_entry.get("watermark_r2_key"):
         delete_r2_object(file_entry["watermark_r2_key"])
+    if file_entry.get("preview_r2_key"):
+        delete_r2_object(file_entry["preview_r2_key"])
 
     new_version = file_entry.get("version", 1) + 1
     content_type = body.get("content_type", "application/octet-stream")
@@ -1953,6 +1980,9 @@ async def replace_file(
         "portal_deliverables.$[d].files.$[f].watermark_r2_key": None,
         "portal_deliverables.$[d].files.$[f].watermark_r2_url": None,
         "portal_deliverables.$[d].files.$[f].watermark_status": "pending" if is_video else "n/a",
+        "portal_deliverables.$[d].files.$[f].preview_r2_key": None,
+        "portal_deliverables.$[d].files.$[f].preview_r2_url": None,
+        "portal_deliverables.$[d].files.$[f].preview_status": "pending" if is_image else "n/a",
         "updated_on": now,
     }
 

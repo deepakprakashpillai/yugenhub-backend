@@ -26,6 +26,22 @@ def generate_thumbnail(image_bytes: bytes, content_type: str) -> bytes:
     return buf.read()
 
 
+def generate_preview(image_bytes: bytes, content_type: str) -> bytes:
+    """Generate a JPEG preview (max 1920px wide) from an image for gallery viewing."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes))
+    img.thumbnail((1920, 1920), Image.LANCZOS)
+
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=75)
+    buf.seek(0)
+    return buf.read()
+
+
 def generate_video_thumbnail(video_bytes: bytes) -> bytes:
     """Extract a frame at 1s from a video and return as JPEG thumbnail."""
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_in:
