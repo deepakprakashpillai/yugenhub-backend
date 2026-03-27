@@ -698,21 +698,23 @@ async def seed_defaults(
 
     seeded = []
     skipped = []
+    skipped_counts = {}
     updates = {}
 
     for field in _SEEDABLE_FIELDS:
-        existing = config.get(field, [])
+        existing = config.get(field) or []
         if not existing:
             updates[field] = copy.deepcopy(DEFAULT_AGENCY_CONFIG[field])
             seeded.append(_FIELD_LABELS[field])
         else:
             skipped.append(_FIELD_LABELS[field])
+            skipped_counts[_FIELD_LABELS[field]] = len(existing)
 
     if updates:
         await db.agency_configs.update_one({}, {"$set": updates})
         logger.info("Seeded defaults for empty config fields", extra={"data": {"agency_id": db.agency_id, "fields": seeded}})
 
-    return {"seeded": seeded, "skipped": skipped}
+    return {"seeded": seeded, "skipped": skipped, "skipped_counts": skipped_counts}
 
 
 # ─── NOTIFICATION PREFERENCES ───────────────────────────────────────────────
