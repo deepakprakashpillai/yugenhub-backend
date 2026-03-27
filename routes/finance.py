@@ -93,10 +93,46 @@ async def create_account(account: AccountModel, db: ScopedDatabase = Depends(get
     existing = await db.accounts.find_one({"name": account.name})
     if existing:
         raise HTTPException(status_code=400, detail="Account with this name already exists")
-    
+
     account.current_balance = account.opening_balance
     await db.accounts.insert_one(account.model_dump())
     return account
+
+@router.post("/accounts/{account_id}/adjust-balance")
+async def adjust_account_balance(
+    account_id: str,
+    body: dict = Body(...),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """
+    Set account to a target balance by creating an income/expense adjustment transaction.
+    The adjustment shows in P&L stats so the books stay consistent.
+    """
+    account = await db.accounts.find_one({"id": account_id})
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    target = float(body.get("target_balance", 0))
+    current = float(account.get("current_balance", 0))
+    diff = round(target - current, 2)
+
+    if abs(diff) < 0.01:
+        return {"message": "No adjustment needed", "adjusted": 0, "new_balance": current}
+
+    tx_type = "income" if diff > 0 else "expense"
+    tx = TransactionModel(
+        account_id=account_id,
+        type=tx_type,
+        amount=abs(diff),
+        category="Balance Adjustment",
+        notes=body.get("note", "Manual balance adjustment"),
+        source="manual",
+    )
+    await db.transactions.insert_one(tx.model_dump())
+    await db.accounts.update_one({"id": account_id}, {"$set": {"current_balance": target}})
+
+    logger.info("Balance adjusted", extra={"data": {"account_id": account_id, "diff": diff, "new_balance": target}})
+    return {"message": "Balance adjusted", "adjusted": diff, "new_balance": target}
 
 # -----------------------------------------------------------------------------
 # Transactions API
