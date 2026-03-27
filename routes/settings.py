@@ -639,9 +639,10 @@ async def get_finance_categories(
 ):
     """Get finance categories configuration."""
     config = await get_or_create_config(db)
-    return parse_mongo_data({
-        "categories": config.get("finance_categories", DEFAULT_AGENCY_CONFIG["finance_categories"])
-    })
+    stored = config.get("finance_categories") or []
+    valid = [c for c in stored if isinstance(c, dict) and c.get("type") in ("income", "expense")]
+    categories = valid if valid else DEFAULT_AGENCY_CONFIG["finance_categories"]
+    return parse_mongo_data({"categories": categories})
 
 
 @router.patch("/finance/categories")
@@ -703,12 +704,21 @@ async def seed_defaults(
 
     for field in _SEEDABLE_FIELDS:
         existing = config.get(field) or []
-        if not existing:
+        # finance_categories items must have a valid 'type' field (income/expense)
+        # to be considered real data — items without 'type' are ghost/corrupt entries
+        if field == "finance_categories":
+            valid = [c for c in existing if isinstance(c, dict) and c.get("type") in ("income", "expense")]
+            is_empty = not valid
+        else:
+            is_empty = not existing
+
+        if is_empty:
             updates[field] = copy.deepcopy(DEFAULT_AGENCY_CONFIG[field])
             seeded.append(_FIELD_LABELS[field])
         else:
             skipped.append(_FIELD_LABELS[field])
-            skipped_counts[_FIELD_LABELS[field]] = len(existing)
+            count = len(valid) if field == "finance_categories" else len(existing)
+            skipped_counts[_FIELD_LABELS[field]] = count
 
     if updates:
         await db.agency_configs.update_one({}, {"$set": updates})
