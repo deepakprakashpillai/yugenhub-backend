@@ -12,6 +12,7 @@ class Config:
     # --- Environment ---
     ENV = os.getenv("ENV", "development") # "development" or "production"
     FRONTEND_URL = [u.strip() for u in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")]
+    GALLERY_FRONTEND_URL = os.getenv("GALLERY_FRONTEND_URL", "http://localhost:5174")
 
     # --- Security Settings ---
     # In production, ALWAYS set this in .env. Never use the fallback.

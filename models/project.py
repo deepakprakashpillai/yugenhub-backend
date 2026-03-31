@@ -95,6 +95,7 @@ class PortalDeliverableModel(BaseModel):
     max_downloads: Optional[int] = None  # None = unlimited
     download_count: int = 0
     downloads_disabled: bool = False
+    gallery_url: Optional[str] = None  # Link to public gallery album for this deliverable
     created_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -114,6 +115,7 @@ class ProjectModel(BaseModel):
     portal_watermark_text: Optional[str] = None  # Falls back to org_name
     portal_default_download_limit: Optional[int] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    gallery_album_id: Optional[str] = None   # Linked gallery album (auto-created)
     created_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

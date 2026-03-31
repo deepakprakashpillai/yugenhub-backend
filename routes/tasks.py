@@ -523,12 +523,21 @@ async def update_task(
     
     if not changes:
         return parse_mongo_data(existing_task)
-        
-    # Update DB
-    update_data["updated_at"] = datetime.now(timezone.utc)
+
+    # Update DB — only write valid model fields to prevent arbitrary field injection
+    filtered_update = {k: v for k, v in update_data.items() if k in valid_fields}
+    # Ensure due_date is stored as a BSON Date, not a string. If stored as a string,
+    # MongoDB's $lt comparisons with a Date value always return true (string type sorts
+    # before Date type in BSON order), causing all such tasks to appear overdue.
+    if "due_date" in filtered_update and isinstance(filtered_update["due_date"], str):
+        try:
+            filtered_update["due_date"] = datetime.fromisoformat(filtered_update["due_date"])
+        except (ValueError, TypeError):
+            filtered_update["due_date"] = None
+    filtered_update["updated_at"] = datetime.now(timezone.utc)
     await db.tasks.update_one(
         {"id": task_id},
-        {"$set": update_data}
+        {"$set": filtered_update}
     )
     
     # Log History

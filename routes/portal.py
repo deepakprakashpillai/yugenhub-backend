@@ -61,6 +61,17 @@ async def get_portal(token: str):
                 "accent_color": config_doc.get("accent_color", "#ef4444"),
             }
 
+    # Fetch gallery link if project has a linked album
+    gallery_url = None
+    gallery_album_id = project.get("gallery_album_id")
+    if gallery_album_id:
+        from database import albums_collection
+        from config import config as app_config
+        from services.gallery_sync import compute_gallery_url
+        album = await albums_collection.find_one({"id": gallery_album_id})
+        if album:
+            gallery_url = compute_gallery_url(album, app_config.GALLERY_FRONTEND_URL)
+
     return _parse_mongo({
         "project_code": project.get("code"),
         "status": project.get("status"),
@@ -72,6 +83,7 @@ async def get_portal(token: str):
         "portal_watermark_enabled": project.get("portal_watermark_enabled", False),
         "created_on": project.get("created_on"),
         "org_settings": org_settings,
+        "gallery_url": gallery_url,
     })
 
 

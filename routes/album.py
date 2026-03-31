@@ -22,6 +22,8 @@ logger = get_logger("albums")
 router = APIRouter(prefix="/api/albums", tags=["Albums"])
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/svg+xml"}
+ALLOWED_VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime", "video/x-msvideo"}
+ALLOWED_MEDIA_TYPES = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
 
 
 # ─── Helper ─────────────────────────────────────────────────────────────────
@@ -41,6 +43,10 @@ def _sign_album_files(album: dict, expires_in: int = 3600) -> dict:
         for file in tab.get("files", []):
             if file.get("r2_key"):
                 file["url"] = generate_presigned_get_url(file["r2_key"], expires_in=expires_in)
+            if file.get("thumbnail_r2_key"):
+                file["thumbnail_url"] = generate_presigned_get_url(file["thumbnail_r2_key"], expires_in=expires_in)
+            if file.get("preview_r2_key"):
+                file["preview_url"] = generate_presigned_get_url(file["preview_r2_key"], expires_in=expires_in)
     # Sign cover image
     if album.get("cover_image_r2_key"):
         album["cover_image_url"] = generate_presigned_get_url(album["cover_image_r2_key"], expires_in=expires_in)
@@ -287,8 +293,8 @@ async def get_upload_url(
     file_name = data.get("file_name", "")
     content_type = data.get("content_type", "")
 
-    if content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=400, detail=f"Only images allowed: {', '.join(ALLOWED_IMAGE_TYPES)}")
+    if content_type not in ALLOWED_MEDIA_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: images and videos")
 
     file_id = str(uuid.uuid4())
     r2_key = f"albums/{current_user.agency_id}/{album_id}/{file_id}_{file_name}"
@@ -436,6 +442,7 @@ async def add_file(
     album_id: str,
     tab_id: str,
     data: dict = Body(...),
+    background_tasks: BackgroundTasks = None,
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db),
 ):
@@ -456,15 +463,21 @@ async def add_file(
     existing_files = album["tabs"][tab_index].get("files", [])
     max_order = max((f.get("sort_order", 0) for f in existing_files), default=-1)
 
+    ct = data["content_type"]
+    media_type = "video" if ct.startswith("video/") else "image"
+
     file = AlbumFileModel(
         file_name=data["file_name"],
-        content_type=data["content_type"],
+        content_type=ct,
         r2_key=data["r2_key"],
         width=data.get("width"),
         height=data.get("height"),
         size_bytes=data.get("size_bytes"),
         sort_order=max_order + 1,
         imported_from_deliverable_id=data.get("imported_from_deliverable_id"),
+        media_type=media_type,
+        duration_seconds=data.get("duration_seconds"),
+        thumbnail_r2_key=data.get("thumbnail_r2_key"),
     )
 
     await db.albums.update_one(
@@ -481,6 +494,14 @@ async def add_file(
         await db.albums.update_one(
             {"id": album_id},
             {"$set": {"cover_image_r2_key": file.r2_key}}
+        )
+
+    # Queue thumbnail + preview generation in background
+    if background_tasks and ct.startswith(("image/", "video/")):
+        from services.media_processing import process_album_thumbnail
+        background_tasks.add_task(
+            process_album_thumbnail,
+            album_id, tab_id, file.id, data["r2_key"], ct, current_user.agency_id
         )
 
     return _parse_mongo(file.model_dump())
@@ -881,12 +902,76 @@ async def get_public_album_content(slug: str, request: Request):
         # In production you could validate it more strictly
 
     album = _parse_mongo(album)
+    
+    # Strip files from initial payload to prevent UI freeze and 1000+ presigned URL bottleneck
+    # but keep the file counts for the UI to know how many exist
+    for tab in album.get("tabs", []):
+        tab["file_count"] = len(tab.get("files", []))
+        tab["total_size_bytes"] = sum(f.get("size", 0) for f in tab.get("files", []))
+        tab["files"] = [] 
+
     album = _sign_album_files(album)
     album.pop("_id", None)
     album.pop("password_hash", None)
     album.pop("agency_id", None)
     album.pop("created_by", None)
     return album
+
+
+@router.get("/public/{slug}/files")
+async def get_public_album_files(
+    slug: str, 
+    tab_id: str, 
+    page: int = Query(1, ge=1), 
+    limit: int = Query(50, ge=1, le=200), 
+    request: Request = None
+):
+    """Paginated presigned files for a specific album tab."""
+    album = await raw_db.albums.find_one({"slug": slug})
+    if not album:
+        raise HTTPException(status_code=404, detail="Album not found")
+    if album["status"] != "published":
+        raise HTTPException(status_code=410, detail="Album not available")
+
+    # Verify token for password-protected albums
+    if album.get("password_hash"):
+        token = request.headers.get("X-Album-Token")
+        if not token:
+            raise HTTPException(status_code=401, detail="Password verification required")
+
+    target_tab = None
+    for tab in album.get("tabs", []):
+        if tab["id"] == tab_id:
+            target_tab = tab
+            break
+            
+    if not target_tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+        
+    files = target_tab.get("files", [])
+    total = len(files)
+    
+    start = (page - 1) * limit
+    end = start + limit
+    paginated_files = files[start:end]
+    
+    # Lazily sign just these files
+    from utils.r2 import generate_presigned_get_url
+    for file in paginated_files:
+        if file.get("r2_key"):
+            file["url"] = generate_presigned_get_url(file["r2_key"], expires_in=3600)
+        if file.get("thumbnail_r2_key"):
+            file["thumbnail_url"] = generate_presigned_get_url(file["thumbnail_r2_key"], expires_in=3600)
+        if file.get("preview_r2_key"):
+            file["preview_url"] = generate_presigned_get_url(file["preview_r2_key"], expires_in=3600)
+            
+    return {
+        "data": _parse_mongo(paginated_files),
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": max(1, (total + limit - 1) // limit)
+    }
 
 
 @router.get("/public/{slug}/download/{file_id}")
@@ -917,6 +1002,45 @@ async def download_file(slug: str, file_id: str):
 
     raise HTTPException(status_code=404, detail="File not found")
 
+
+# ─── Zip Generator ───────────────────────────────────────────────────────────
+
+@router.post("/public/{slug}/generate-zip")
+async def request_zip_generation(
+    slug: str, 
+    data: dict = Body(...),
+    background_tasks: BackgroundTasks = None
+):
+    """Start an async zip generation job for large bulk downloads."""
+    tab_id = data.get("tab_id")
+    file_ids = data.get("file_ids", [])
+    
+    # Simple check if album exists
+    album = await raw_db.albums.find_one({"slug": slug}, {"id": 1})
+    if not album:
+        raise HTTPException(status_code=404, detail="Album not found")
+        
+    job_id = str(uuid.uuid4())
+    await raw_db.zip_jobs.insert_one({
+        "id": job_id,
+        "slug": slug,
+        "status": "processing",
+        "progress": {"completed": 0, "total": max(1, len(file_ids))},
+        "created_at": datetime.now(timezone.utc)
+    })
+    
+    from services.zip_service import process_background_zip
+    background_tasks.add_task(process_background_zip, job_id, slug, tab_id, file_ids)
+    
+    return {"job_id": job_id}
+
+@router.get("/public/{slug}/zip-job/{job_id}")
+async def check_zip_job(slug: str, job_id: str):
+    """Poll for zip job status."""
+    job = await raw_db.zip_jobs.find_one({"id": job_id})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _parse_mongo(job)
 
 # ─── Analytics ───────────────────────────────────────────────────────────────
 
