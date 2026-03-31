@@ -300,6 +300,19 @@ async def create_project(
                 await on_deliverable_task_created(db, task_dict, project_id)
             logger.info(f"Created {len(all_new_tasks)} tasks during project creation", extra={"data": {"project_id": project_id}})
 
+    # Auto-create a gallery album with one tab per event
+    try:
+        from services.gallery_sync import ensure_project_album
+        from database import albums_collection
+        album_id = await ensure_project_album(project_id, project_data, current_user.agency_id, albums_collection)
+        await db.projects.update_one(
+            {"_id": new_project.inserted_id},
+            {"$set": {"gallery_album_id": album_id}}
+        )
+        project_data["gallery_album_id"] = album_id
+    except Exception as e:
+        logger.error(f"Failed to auto-create gallery album for project {project_id}: {e}")
+
     logger.info(f"Project created with sequential code", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical'], "event_count": len(project.events)}})
     
     return parse_mongo_data(project_data)
@@ -879,6 +892,26 @@ async def add_event_to_project(
                 await on_deliverable_task_created(db, task_dict, project_id)
             logger.info(f"Created tasks from deliverables", extra={"data": {"count": len(new_tasks), "event_type": event.type, "project_id": project_id}})
 
+    # Sync: add a new tab to the linked gallery album for this event
+    try:
+        from services.gallery_sync import sync_event_to_album_tab, ensure_project_album
+        from database import albums_collection
+        project_doc = project_doc or await db.projects.find_one({"_id": ObjectId(project_id)})
+        if project_doc:
+            album_id = project_doc.get("gallery_album_id")
+            if not album_id:
+                # Album doesn't exist yet — create it (handles existing projects that pre-date this feature)
+                album_id = await ensure_project_album(project_id, project_doc, current_user.agency_id, albums_collection)
+                if album_id:
+                    await db.projects.update_one(
+                        {"_id": ObjectId(project_id)},
+                        {"$set": {"gallery_album_id": album_id}}
+                    )
+            if album_id:
+                await sync_event_to_album_tab(album_id, event.model_dump(), albums_collection)
+    except Exception as e:
+        logger.error(f"Failed to sync event to gallery album: {e}")
+
     return {"message": "Event added successfully", "calendar_synced": calendar_synced}
 
 @router.patch("/{project_id}")
@@ -899,17 +932,21 @@ async def update_project(
         
     old_name = await _resolve_project_name(old_project, db)
 
-    # Prevent updating immutable fields or fields handled by specific logic
-    update_data.pop("_id", None)
-    update_data.pop("events", None) 
-    update_data.pop("assignments", None)  # Handled by dedicated endpoints
-    update_data.pop("code", None) 
-    update_data.pop("agency_id", None) 
-    update_data["updated_on"] = datetime.now(timezone.utc)
+    # Whitelist of fields that can be updated via this generic endpoint.
+    # Immutable fields (_id, code, agency_id), structured sub-documents handled by
+    # dedicated endpoints (events, assignments, portal_deliverables), and
+    # system fields (created_on) are all excluded.
+    ALLOWED_PROJECT_FIELDS = {
+        "vertical", "client_id", "status", "lead_source", "metadata",
+        "portal_token", "portal_watermark_enabled", "portal_watermark_text",
+        "portal_default_download_limit", "gallery_album_id",
+    }
+    filtered_data = {k: v for k, v in update_data.items() if k in ALLOWED_PROJECT_FIELDS}
+    filtered_data["updated_on"] = datetime.now(timezone.utc)
 
     result = await db.projects.update_one(
         {"_id": ObjectId(project_id)},
-        {"$set": update_data}
+        {"$set": filtered_data}
     )
 
     if result.matched_count == 0:
@@ -966,7 +1003,7 @@ async def update_event(
             try:
                 update_data[date_field] = datetime.fromisoformat(update_data[date_field])
             except (ValueError, TypeError):
-                pass
+                raise HTTPException(status_code=400, detail=f"Invalid date format for field '{date_field}'")
 
     old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
     if not old_project:
@@ -1012,14 +1049,29 @@ async def update_event(
                 # Existing deliverable — update task fields
                 old_qty = existing_task.get("quantity", 1)
                 new_qty = deliverable.get("quantity", 1)
+                raw_due = deliverable.get('due_date')
+                if isinstance(raw_due, str) and raw_due:
+                    try:
+                        raw_due = datetime.fromisoformat(raw_due)
+                    except (ValueError, TypeError):
+                        raw_due = None
+                task_set_fields = {
+                    "due_date": raw_due,
+                    "quantity": new_qty,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+                # Only regenerate title if the deliverable type changed, to preserve
+                # any manual title edits the user made via TaskModal.
+                new_deliv_type = deliverable.get('type', 'Deliverable')
+                expected_title = f"{new_deliv_type} ({event_type})"
+                existing_title = existing_task.get("title", "")
+                # Extract the base type from the existing title (strip " (EventType)" suffix)
+                existing_base = existing_title.rsplit(" (", 1)[0] if " (" in existing_title else existing_title
+                if existing_base != new_deliv_type:
+                    task_set_fields["title"] = expected_title
                 await db.tasks.update_one(
                     {"id": existing_task["id"]},
-                    {"$set": {
-                        "due_date": deliverable.get('due_date'),
-                        "quantity": new_qty,
-                        "title": f"{deliverable.get('type', 'Deliverable')} ({event_type})",
-                        "updated_at": datetime.now(timezone.utc),
-                    }}
+                    {"$set": task_set_fields}
                 )
                 # Sync portal deliverables if quantity changed
                 if old_qty != new_qty:
@@ -1392,12 +1444,29 @@ async def revalidate_all_projects(
       2. Deliverable due_date stored as strings inside event subdocuments
       3. Missing deliverable tasks for event deliverables that were never synced
       4. Portal deliverable count mismatches (creates missing, removes empty excess)
+      5. Task due_date stored as strings (converts to proper BSON Dates — fixes false overdue)
     """
     projects = await db.projects.find({}).to_list(length=None)
+
+    # --- 0. Fix task due_dates stored as strings (agency-wide, runs once before project loop) ---
+    task_due_date_fixed = 0
+    async for task in db.tasks.find({"due_date": {"$type": "string"}}):
+        raw = task.get("due_date", "")
+        if raw:
+            try:
+                parsed = datetime.fromisoformat(raw)
+                await db.tasks.update_one(
+                    {"id": task["id"]},
+                    {"$set": {"due_date": parsed}}
+                )
+                task_due_date_fixed += 1
+            except (ValueError, TypeError):
+                pass
 
     stats = {
         "projects_scanned": len(projects),
         "event_dates_fixed": 0,
+        "task_due_dates_fixed": task_due_date_fixed,
         "tasks_created": 0,
         "portal_deliverables_created": 0,
         "portal_deliverables_removed": 0,
@@ -2178,4 +2247,108 @@ async def get_portal_analytics(
         "deliverable_downloads": deliverable_downloads,
         "timeline": sorted(timeline.values(), key=lambda x: x["date"]),
         "recent_activity": recent,
+    }
+
+
+@router.get("/{project_id}/combined-analytics")
+async def get_combined_analytics(
+    project_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """
+    Unified analytics merging portal (client engagement) and gallery (public views)
+    data for a single project.
+    """
+    from bson import ObjectId
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # RBAC check
+    user_verticals = await get_user_verticals(current_user, db)
+    if project.get("vertical") and project["vertical"] not in user_verticals:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from database import portal_analytics_collection, album_analytics_collection, albums_collection
+
+    # ── Portal analytics ──────────────────────────────────────────────────────
+    portal_events = await portal_analytics_collection.find(
+        {"project_id": project_id}
+    ).sort("timestamp", -1).to_list(length=5000)
+
+    portal_visits = sum(1 for e in portal_events if e.get("event_type") == "visit")
+    portal_downloads = sum(1 for e in portal_events if e.get("event_type") == "file_download")
+    portal_unique_ips = len({e.get("ip_address") for e in portal_events if e.get("ip_address")})
+
+    # ── Gallery analytics ─────────────────────────────────────────────────────
+    gallery_views = 0
+    gallery_downloads = 0
+    gallery_tab_views = 0
+    gallery_unique_ips = 0
+
+    album_id = project.get("gallery_album_id")
+    if album_id:
+        album = await albums_collection.find_one({"id": album_id})
+        if album:
+            gallery_events = await album_analytics_collection.find(
+                {"album_slug": album.get("slug")}
+            ).sort("timestamp", -1).to_list(length=5000)
+
+            gallery_views = sum(1 for e in gallery_events if e.get("event_type") == "view")
+            gallery_downloads = sum(1 for e in gallery_events if e.get("event_type") in ("download", "bulk_download"))
+            gallery_tab_views = sum(1 for e in gallery_events if e.get("event_type") == "tab_view")
+            gallery_unique_ips = len({e.get("ip_address") for e in gallery_events if e.get("ip_address")})
+
+    # ── Timeline: merge both sources ──────────────────────────────────────────
+    timeline = {}
+
+    def add_to_timeline(events, visit_type, download_type, source_label):
+        for e in events:
+            ts = e.get("timestamp")
+            if not ts:
+                date_str = "unknown"
+            elif isinstance(ts, str):
+                try:
+                    # Parse basic ISO 8601 if needed
+                    from datetime import datetime
+                    date_str = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                except ValueError:
+                    date_str = ts[:10]  # rough fallback to YYYY-MM-DD
+            else:
+                date_str = ts.strftime("%Y-%m-%d")
+
+            if date_str not in timeline:
+                timeline[date_str] = {"date": date_str, "portal_visits": 0, "portal_downloads": 0,
+                                      "gallery_views": 0, "gallery_downloads": 0}
+            if e.get("event_type") == visit_type:
+                timeline[date_str][f"{source_label}_visits" if source_label == "portal" else f"{source_label}_views"] += 1
+            elif e.get("event_type") in (download_type if isinstance(download_type, tuple) else (download_type,)):
+                timeline[date_str][f"{source_label}_downloads"] += 1
+
+    add_to_timeline(portal_events, "visit", "file_download", "portal")
+    if album_id:
+        add_to_timeline(gallery_events if album_id else [], "view", ("download", "bulk_download"), "gallery")
+
+    return {
+        "portal": {
+            "total_visits": portal_visits,
+            "unique_visitors": portal_unique_ips,
+            "total_downloads": portal_downloads,
+        },
+        "gallery": {
+            "total_views": gallery_views,
+            "unique_visitors": gallery_unique_ips,
+            "total_downloads": gallery_downloads,
+            "tab_views": gallery_tab_views,
+            "linked_album_id": album_id,
+        },
+        "combined": {
+            "total_engagement": portal_visits + gallery_views,
+            "total_downloads": portal_downloads + gallery_downloads,
+        },
+        "timeline": sorted(timeline.values(), key=lambda x: x["date"]),
     }

@@ -14,6 +14,12 @@ class AlbumFileModel(BaseModel):
     size_bytes: Optional[int] = None
     sort_order: int = 0
     imported_from_deliverable_id: Optional[str] = None
+    # Video-specific fields
+    media_type: Optional[Literal["image", "video"]] = None  # Derived from content_type
+    duration_seconds: Optional[float] = None
+    thumbnail_r2_key: Optional[str] = None  # 400x400 thumbnail (images & videos)
+    preview_r2_key: Optional[str] = None    # 1920px preview (images only) — used for grid rendering
+    thumbnail_status: str = "pending"       # pending | processing | done | failed
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -21,6 +27,7 @@ class AlbumTabModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str = "Gallery"
     sort_order: int = 0
+    event_id: Optional[str] = None   # Links to EventModel.id for gallery sync
     files: List[AlbumFileModel] = Field(default_factory=list)
 
 

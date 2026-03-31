@@ -873,6 +873,56 @@ async def reset_config(
     )
     return {"message": "Configuration reset to defaults"}
 
+
+@router.post("/sync-gallery-albums")
+async def sync_gallery_albums(
+    current_user: UserModel = Depends(require_role("owner")),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """
+    Backfill: ensure every project in this agency has a linked gallery album.
+    Idempotent — skips projects that already have a valid album.
+    Owner only. Safe to run multiple times.
+    """
+    from services.gallery_sync import ensure_project_album
+    from database import albums_collection
+
+    created = 0
+    skipped = 0
+    failed = 0
+
+    async for project in db.projects.find({}):
+        project_id = str(project["_id"])
+        existing_album_id = project.get("gallery_album_id")
+
+        if existing_album_id:
+            existing = await albums_collection.find_one({"id": existing_album_id})
+            if existing:
+                skipped += 1
+                continue
+
+        try:
+            album_id = await ensure_project_album(project_id, project, current_user.agency_id, albums_collection)
+            await db.projects.update_one(
+                {"_id": project["_id"]},
+                {"$set": {"gallery_album_id": album_id}}
+            )
+            created += 1
+        except Exception as e:
+            logger.error(f"Failed to create album for project {project_id}: {e}")
+            failed += 1
+
+    logger.info(
+        "Gallery album sync completed",
+        extra={"data": {"agency_id": current_user.agency_id, "created": created, "skipped": skipped, "failed": failed}}
+    )
+    return {
+        "message": f"Sync complete: {created} albums created, {skipped} already existed{f', {failed} failed' if failed else ''}.",
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
 # ─── AUTOMATIONS ─────────────────────────────────────────────────────────────
 
 @router.get("/automations")
@@ -909,3 +959,76 @@ async def update_automations(
         extra={"data": {"agency_id": current_user.agency_id, "fields": list(automations.keys())}}
     )
     return {"message": "Automations configuration updated"}
+
+
+# ─── GALLERY DEFAULTS ────────────────────────────────────────────────────────
+
+DEFAULT_GALLERY_DEFAULTS = {
+    "default_color_scheme": "light",     # "light" | "dark"
+    "default_gallery_layout": "masonry", # "masonry" | "grid" | "columns"
+    "auto_create_gallery": True,         # auto-create album on project creation
+    "gallery_footer": {
+        "brand_name": "",
+        "tagline": "",
+        "instagram": "",
+        "website": "",
+    },
+}
+
+@router.get("/gallery-defaults")
+async def get_gallery_defaults(
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Get gallery default configuration."""
+    config = await get_or_create_config(db)
+    stored = config.get("gallery_defaults") or {}
+    # Deep-merge with defaults (so new keys always appear)
+    result = {**DEFAULT_GALLERY_DEFAULTS, **stored}
+    result["gallery_footer"] = {**DEFAULT_GALLERY_DEFAULTS["gallery_footer"], **stored.get("gallery_footer", {})}
+    return parse_mongo_data({"gallery_defaults": result})
+
+
+@router.patch("/gallery-defaults")
+async def update_gallery_defaults(
+    updates: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Update gallery default configuration. Owner/admin only."""
+    gallery_defaults = updates.get("gallery_defaults")
+    if gallery_defaults is None:
+        raise HTTPException(status_code=400, detail="'gallery_defaults' field required")
+
+    # Allowlist what can be updated
+    allowed_keys = {"default_color_scheme", "default_gallery_layout", "auto_create_gallery", "gallery_footer"}
+    filtered = {k: v for k, v in gallery_defaults.items() if k in allowed_keys}
+
+    # Validate enums
+    if "default_color_scheme" in filtered and filtered["default_color_scheme"] not in ("light", "dark"):
+        raise HTTPException(status_code=400, detail="default_color_scheme must be 'light' or 'dark'")
+    if "default_gallery_layout" in filtered and filtered["default_gallery_layout"] not in ("masonry", "grid", "columns"):
+        raise HTTPException(status_code=400, detail="default_gallery_layout must be 'masonry', 'grid', or 'columns'")
+    if "auto_create_gallery" in filtered and not isinstance(filtered["auto_create_gallery"], bool):
+        raise HTTPException(status_code=400, detail="auto_create_gallery must be a boolean")
+
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No valid gallery_defaults fields to update")
+
+    # Fetch current to do a deep merge on gallery_footer
+    current_config = await get_or_create_config(db)
+    current_defaults = current_config.get("gallery_defaults") or {}
+    if "gallery_footer" in filtered:
+        current_footer = current_defaults.get("gallery_footer") or {}
+        filtered["gallery_footer"] = {**current_footer, **filtered["gallery_footer"]}
+
+    # Build set dict using dotted keys for nested merge safety
+    set_updates = {f"gallery_defaults.{k}": v for k, v in filtered.items()}
+
+    await db.agency_configs.update_one({}, {"$set": set_updates})
+    logger.info(
+        "Gallery defaults updated",
+        extra={"data": {"agency_id": current_user.agency_id, "fields": list(filtered.keys())}}
+    )
+    return {"message": "Gallery defaults updated", "updated": list(filtered.keys())}
+
