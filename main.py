@@ -9,7 +9,7 @@ from logging_config import get_logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from middleware import RequestLifecycleMiddleware
-from routes import associate, client, config as config_router, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance, push, integration, agent, portal, album
+from routes import associate, client, config as config_router, project, tasks, auth, calendar, notifications, users, dashboard, settings, templates, finance, push, integration, agent, portal, album, media as media_router_module
 from config import config
 
 logger = get_logger("app")
@@ -18,6 +18,17 @@ logger = get_logger("app")
 @asynccontextmanager
 async def lifespan(app):
     from routes.album import expire_albums_loop
+    from database import db as _db
+
+    # Create indexes for media library collections
+    await _db.media_folders.create_index([("agency_id", 1), ("parent_id", 1)])
+    await _db.media_folders.create_index([("agency_id", 1), ("path", 1)])
+    await _db.media_items.create_index([("agency_id", 1), ("folder_id", 1)])
+    await _db.media_items.create_index([("agency_id", 1), ("status", 1)])
+    await _db.media_items.create_index([("share_token", 1)], sparse=True)
+    await _db.media_items.create_index([("source_deliverable_id", 1)], sparse=True)
+    await _db.bucket_stats_cache.create_index([("agency_id", 1)], unique=True)
+
     task = asyncio.create_task(expire_albums_loop())
     yield
     task.cancel()
@@ -56,6 +67,7 @@ app.include_router(integration.router)
 app.include_router(agent.router)
 app.include_router(portal.router)
 app.include_router(album.router)
+app.include_router(media_router_module.router)
 
 logger.info("All routers registered, YugenHub API ready")
 
