@@ -1880,6 +1880,7 @@ async def delete_file_from_deliverable(
 async def attach_media_to_deliverable(
     project_id: str,
     deliverable_id: str,
+    background_tasks: BackgroundTasks,
     body: dict = Body(...),
     current_user: UserModel = Depends(get_current_user),
     db: ScopedDatabase = Depends(get_db)
@@ -1946,6 +1947,18 @@ async def attach_media_to_deliverable(
         raise HTTPException(status_code=404, detail="Project or deliverable not found")
 
     await on_portal_file_added(db, project_id, deliverable_id)
+
+    # Trigger thumbnail generation if the MediaItem doesn't have one yet
+    thumb_status = media_item_doc.get("thumbnail_status", "n/a")
+    if thumb_status in ("pending", "failed") and (is_image or is_video):
+        from services.media_processing import process_media_item_thumbnail
+        background_tasks.add_task(
+            process_media_item_thumbnail,
+            media_item_id,
+            media_item_doc["r2_key"],
+            content_type,
+            media_item_doc.get("agency_id", current_user.agency_id),
+        )
 
     logger.info(
         "Media item attached to deliverable",
