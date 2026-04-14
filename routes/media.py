@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional
+import secrets
 import uuid
 
 from bson import ObjectId
@@ -446,3 +447,105 @@ async def search_items(
             item["thumbnail_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
 
     return {"data": items, "count": len(items)}
+
+
+# ─── Sharing Endpoints ────────────────────────────────────────────────────────
+
+@router.post("/items/{item_id}/share")
+async def create_share_link(
+    item_id: str,
+    data: dict = Body(default={}),
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Generate (or refresh) a public share token for a media item."""
+    item = await db.media_items.find_one({"id": item_id, "status": "active"})
+    if not item:
+        raise HTTPException(status_code=404, detail="Media item not found")
+
+    expires_in_days: Optional[int] = data.get("expires_in_days")  # None = never expires
+    expires_at = None
+    if expires_in_days is not None:
+        if not isinstance(expires_in_days, int) or expires_in_days < 1:
+            raise HTTPException(status_code=400, detail="expires_in_days must be a positive integer")
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+
+    await db.media_items.update_one(
+        {"id": item_id},
+        {"$set": {"share_token": token, "share_expires_at": expires_at, "updated_at": now}}
+    )
+
+    share_url = f"{config.FRONTEND_URL[0]}/share/{token}"
+    logger.info("Share link created", extra={"data": {"item_id": item_id}})
+    return {"share_url": share_url, "token": token, "expires_at": expires_at}
+
+
+@router.delete("/items/{item_id}/share", status_code=204)
+async def revoke_share_link(
+    item_id: str,
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Revoke the public share token for a media item."""
+    item = await db.media_items.find_one({"id": item_id})
+    if not item:
+        raise HTTPException(status_code=404, detail="Media item not found")
+
+    await db.media_items.update_one(
+        {"id": item_id},
+        {"$set": {"share_token": None, "share_expires_at": None, "updated_at": datetime.now(timezone.utc)}}
+    )
+    logger.info("Share link revoked", extra={"data": {"item_id": item_id}})
+
+
+@router.get("/share/{token}")
+async def resolve_share_link(token: str):
+    """Public endpoint — no auth required. Resolves a share token to a presigned download URL."""
+    item = await raw_db.media_items.find_one({"share_token": token, "status": "active"})
+    if not item:
+        raise HTTPException(status_code=404, detail="Share link not found or expired")
+
+    expires_at = item.get("share_expires_at")
+    if expires_at:
+        # MongoDB may return a timezone-naive UTC datetime; normalise before comparing
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=410, detail="Share link has expired")
+
+    url = generate_presigned_get_url(item["r2_key"], expires_in=3600)
+    return {
+        "url": url,
+        "file_name": item["name"],
+        "content_type": item["content_type"],
+        "expires_in": 3600,
+    }
+
+
+# ─── R2 Usage Endpoints ───────────────────────────────────────────────────────
+
+@router.get("/usage")
+async def get_usage_stats(
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Return cached R2 storage stats. Flags as stale if older than 24 h."""
+    from services.r2_usage import get_cached_stats
+    stats = await get_cached_stats(current_user.agency_id, db)
+    return stats
+
+
+@router.post("/usage/refresh")
+async def refresh_usage_stats(
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Trigger a background recalculation of R2 usage stats."""
+    from services.r2_usage import calculate_bucket_stats
+    background_tasks.add_task(calculate_bucket_stats, current_user.agency_id, db)
+    logger.info("R2 usage refresh queued", extra={"data": {"agency_id": current_user.agency_id}})
+    return {"status": "refreshing"}
