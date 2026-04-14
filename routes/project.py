@@ -1735,11 +1735,62 @@ async def add_file_to_deliverable(
     # Auto-transition Pending -> Uploaded via sync service
     await on_portal_file_added(db, project_id, deliverable_id)
 
+    # Fetch project for agency_id, watermark settings, and folder naming
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"agency_id": 1, "code": 1, "metadata": 1, "portal_watermark_enabled": 1, "portal_watermark_text": 1, "portal_deliverables": 1}
+    )
+    agency_id = project.get("agency_id", current_user.agency_id) if project else current_user.agency_id
+
+    # Auto-create MediaItem in Media library under a system folder
+    try:
+        from services.media_folders import get_or_create_system_folder
+        from models.media import MediaItem as MediaItemModel
+
+        project_label = (project.get("code") or project.get("metadata", {}).get("project_type", "Project")) if project else "Project"
+        deliverable_title = deliverable_id
+        if project:
+            for pd in project.get("portal_deliverables", []):
+                if pd["id"] == deliverable_id:
+                    deliverable_title = pd.get("title", deliverable_id)
+                    break
+
+        folder_id = await get_or_create_system_folder(
+            agency_id,
+            ["Deliverables", project_label, deliverable_title],
+            db
+        )
+        media_item = MediaItemModel(
+            agency_id=agency_id,
+            folder_id=folder_id,
+            name=body["file_name"],
+            r2_key=body["r2_key"],
+            r2_url=body["r2_url"],
+            content_type=content_type,
+            size_bytes=body.get("size_bytes", 0),
+            thumbnail_status="pending" if (is_image or is_video) else "n/a",
+            preview_status="pending" if is_image else "n/a",
+            watermark_status="pending" if is_video else "n/a",
+            source="deliverable",
+            source_project_id=project_id,
+            source_deliverable_id=deliverable_id,
+            uploaded_by=current_user.id,
+            status="active",
+        )
+        await db.media_items.insert_one(media_item.model_dump())
+
+        # Link the file entry to the media item
+        await db.projects.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$set": {"portal_deliverables.$[d].files.$[f].media_item_id": media_item.id}},
+            array_filters=[{"d.id": deliverable_id}, {"f.id": file_entry.id}]
+        )
+    except Exception:
+        logger.error("Failed to create MediaItem for deliverable file", exc_info=True)
+        # Non-fatal — deliverable file is saved, media link is best-effort
+
     # Queue thumbnail generation for image/video files
     if is_image or is_video:
-        # Fetch agency_id for R2 path
-        project = await db.projects.find_one({"_id": ObjectId(project_id)}, {"agency_id": 1, "portal_watermark_enabled": 1, "portal_watermark_text": 1})
-        agency_id = project.get("agency_id", "default") if project else "default"
         from services.media_processing import process_thumbnail, process_watermark
         background_tasks.add_task(process_thumbnail, project_id, deliverable_id, file_entry.id, body["r2_key"], content_type, agency_id)
 
@@ -1778,13 +1829,30 @@ async def delete_file_from_deliverable(
     if deliverable:
         file_entry = next((f for f in deliverable.get("files", []) if f["id"] == file_id), None)
         if file_entry:
-            delete_r2_object(file_entry["r2_key"])
-            if file_entry.get("thumbnail_r2_key"):
-                delete_r2_object(file_entry["thumbnail_r2_key"])
-            if file_entry.get("watermark_r2_key"):
-                delete_r2_object(file_entry["watermark_r2_key"])
-            if file_entry.get("preview_r2_key"):
-                delete_r2_object(file_entry["preview_r2_key"])
+            media_item_id = file_entry.get("media_item_id")
+            if media_item_id:
+                # Check MediaItem source: deliverable-originated files → delete MediaItem + R2
+                # Media-library-attached files → just unlink, leave MediaItem intact
+                media_item = await db.media_items.find_one({"id": media_item_id})
+                if media_item and media_item.get("source") == "deliverable":
+                    await db.media_items.delete_one({"id": media_item_id})
+                    delete_r2_object(file_entry["r2_key"])
+                    if file_entry.get("thumbnail_r2_key"):
+                        delete_r2_object(file_entry["thumbnail_r2_key"])
+                    if file_entry.get("watermark_r2_key"):
+                        delete_r2_object(file_entry["watermark_r2_key"])
+                    if file_entry.get("preview_r2_key"):
+                        delete_r2_object(file_entry["preview_r2_key"])
+                # else: file was attached from Media library — leave MediaItem + R2 alone
+            else:
+                # Legacy file (no media_item_id) — delete R2 directly
+                delete_r2_object(file_entry["r2_key"])
+                if file_entry.get("thumbnail_r2_key"):
+                    delete_r2_object(file_entry["thumbnail_r2_key"])
+                if file_entry.get("watermark_r2_key"):
+                    delete_r2_object(file_entry["watermark_r2_key"])
+                if file_entry.get("preview_r2_key"):
+                    delete_r2_object(file_entry["preview_r2_key"])
 
     remaining_files = len([f for f in deliverable.get("files", []) if f["id"] != file_id]) if deliverable else 0
     now = datetime.now(timezone.utc)
@@ -1806,6 +1874,84 @@ async def delete_file_from_deliverable(
     await on_portal_file_removed(db, project_id, deliverable_id, remaining_files)
 
     return {"message": "File deleted"}
+
+
+@router.post("/{project_id}/deliverables/{deliverable_id}/attach-media")
+async def attach_media_to_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Link an existing Media library item to a deliverable (Select from Media flow)."""
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    media_item_id = body.get("media_item_id")
+    if not media_item_id:
+        raise HTTPException(status_code=400, detail="media_item_id is required")
+
+    # Validate media item exists, belongs to same agency, and is active
+    media_item_doc = await db.media_items.find_one({"id": media_item_id, "status": "active"})
+    if not media_item_doc:
+        raise HTTPException(status_code=404, detail="Media item not found")
+
+    # Validate deliverable exists
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    deliverable = next(
+        (d for d in project.get("portal_deliverables", []) if d["id"] == deliverable_id),
+        None
+    )
+    if not deliverable:
+        raise HTTPException(status_code=404, detail="Deliverable not found")
+
+    content_type = media_item_doc.get("content_type", "application/octet-stream")
+    is_image = content_type.startswith("image/")
+    is_video = content_type.startswith("video/")
+
+    file_entry = DeliverableFile(
+        file_name=media_item_doc.get("name", "file"),
+        content_type=content_type,
+        r2_key=media_item_doc["r2_key"],
+        r2_url=media_item_doc["r2_url"],
+        thumbnail_status=media_item_doc.get("thumbnail_status", "n/a"),
+        thumbnail_r2_key=media_item_doc.get("thumbnail_r2_key"),
+        thumbnail_r2_url=media_item_doc.get("thumbnail_r2_url"),
+        watermark_status="n/a",
+        preview_status=media_item_doc.get("preview_status", "n/a"),
+        preview_r2_key=media_item_doc.get("preview_r2_key"),
+        preview_r2_url=media_item_doc.get("preview_r2_url"),
+        media_item_id=media_item_id,
+    )
+
+    now = datetime.now(timezone.utc)
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id), "portal_deliverables.id": deliverable_id},
+        {
+            "$push": {"portal_deliverables.$.files": file_entry.model_dump()},
+            "$set": {
+                "portal_deliverables.$.updated_on": now,
+                "updated_on": now,
+            },
+        }
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project or deliverable not found")
+
+    await on_portal_file_added(db, project_id, deliverable_id)
+
+    logger.info(
+        "Media item attached to deliverable",
+        extra={"data": {"project_id": project_id, "deliverable_id": deliverable_id, "media_item_id": media_item_id}}
+    )
+    return file_entry.model_dump()
 
 
 @router.post("/{project_id}/deliverables/{deliverable_id}/feedback")
