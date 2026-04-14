@@ -3,7 +3,7 @@
 from logging_config import get_logger
 from utils.r2 import download_r2_object, upload_r2_object, delete_r2_object
 from utils.media import generate_thumbnail, generate_preview, generate_video_thumbnail, apply_video_watermark
-from database import projects_collection, albums_collection
+from database import projects_collection, albums_collection, media_items_collection
 from config import config
 
 logger = get_logger("media_processing")
@@ -151,3 +151,58 @@ async def process_album_thumbnail(
     except Exception as e:
         logger.error(f"Album thumbnail generation failed for file {file_id}: {e}")
         await _update_album_file_field(album_id, tab_id, file_id, {"thumbnail_status": "failed"})
+
+
+async def process_media_item_thumbnail(item_id: str, r2_key: str, content_type: str, agency_id: str):
+    """Background task: generate thumbnail + preview for a Media Library item.
+
+    Stores derived assets under media/{agency_id}/thumbs/ and media/{agency_id}/previews/.
+    Updates media_items collection directly (not nested in projects).
+    """
+    from datetime import datetime, timezone
+    thumb_r2_key = f"media/{agency_id}/thumbs/{item_id}.jpg"
+    preview_r2_key = f"media/{agency_id}/previews/{item_id}.jpg"
+    is_image = content_type.startswith("image/")
+
+    try:
+        initial = {"thumbnail_status": "processing"}
+        if is_image:
+            initial["preview_status"] = "processing"
+        await media_items_collection.update_one({"id": item_id}, {"$set": initial})
+
+        file_bytes = download_r2_object(r2_key)
+
+        if is_image:
+            thumb_bytes = generate_thumbnail(file_bytes, content_type)
+            preview_bytes = generate_preview(file_bytes, content_type)
+        elif content_type.startswith("video/"):
+            thumb_bytes = generate_video_thumbnail(file_bytes)
+        else:
+            return
+
+        upload_r2_object(thumb_r2_key, thumb_bytes, "image/jpeg")
+        thumb_url = f"{config.R2_PUBLIC_URL}/{thumb_r2_key}" if config.R2_PUBLIC_URL else thumb_r2_key
+
+        updates = {
+            "thumbnail_r2_key": thumb_r2_key,
+            "thumbnail_r2_url": thumb_url,
+            "thumbnail_status": "done",
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+        if is_image:
+            upload_r2_object(preview_r2_key, preview_bytes, "image/jpeg")
+            preview_url = f"{config.R2_PUBLIC_URL}/{preview_r2_key}" if config.R2_PUBLIC_URL else preview_r2_key
+            updates["preview_r2_key"] = preview_r2_key
+            updates["preview_r2_url"] = preview_url
+            updates["preview_status"] = "done"
+
+        await media_items_collection.update_one({"id": item_id}, {"$set": updates})
+        logger.info(f"Media item thumbnail{'+ preview ' if is_image else ' '}generated for {item_id}")
+
+    except Exception as e:
+        logger.error(f"Media item thumbnail generation failed for {item_id}: {e}")
+        fail = {"thumbnail_status": "failed"}
+        if is_image:
+            fail["preview_status"] = "failed"
+        await media_items_collection.update_one({"id": item_id}, {"$set": fail})
