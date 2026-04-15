@@ -28,6 +28,7 @@ async def lifespan(app):
     await _db.media_items.create_index([("share_token", 1)], sparse=True)
     await _db.media_items.create_index([("source_deliverable_id", 1)], sparse=True)
     await _db.bucket_stats_cache.create_index([("agency_id", 1)], unique=True)
+    await _db.migration_jobs.create_index([("agency_id", 1), ("started_at", -1)])
 
     task = asyncio.create_task(expire_albums_loop())
     yield

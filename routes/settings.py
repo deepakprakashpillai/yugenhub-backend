@@ -1067,6 +1067,7 @@ async def start_migration(
         "job_id": job_id,
         "agency_id": agency_id,
         "status": "queued",
+        "total": 0,
         "migrated": 0,
         "failed": 0,
         "errors": [],

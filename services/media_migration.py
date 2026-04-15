@@ -116,8 +116,23 @@ async def run_migration(agency_id: str, job_id: str):
     try:
         await _update_job(job_id, status="running")
 
-        # ── 1. Deliverable files ───────────────────────────────────────────────
+        # Count total unmigrated files upfront for progress tracking
         projects = await raw_db.projects.find({"agency_id": agency_id}).to_list(length=None)
+        albums = await raw_db.albums.find({"agency_id": agency_id}).to_list(length=None)
+        total = sum(
+            1 for p in projects
+            for pd in p.get("portal_deliverables", [])
+            for f in pd.get("files", [])
+            if not f.get("media_item_id") and f.get("r2_key")
+        ) + sum(
+            1 for a in albums
+            for t in a.get("tabs", [])
+            for f in t.get("files", [])
+            if f.get("r2_key")
+        )
+        await _update_job(job_id, total=total)
+
+        # ── 1. Deliverable files ───────────────────────────────────────────────
 
         for project in projects:
             project_id = str(project["_id"])
@@ -250,8 +265,6 @@ async def run_migration(agency_id: str, job_id: str):
                     await _update_job(job_id, migrated=migrated, failed=failed)
 
         # ── 2. Album files ─────────────────────────────────────────────────────
-        albums = await raw_db.albums.find({"agency_id": agency_id}).to_list(length=None)
-
         for album in albums:
             album_id = album["id"]
             album_title = album.get("title", album_id)
