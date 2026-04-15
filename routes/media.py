@@ -228,10 +228,11 @@ async def delete_folder(
         )
 
     if cascade and item_count > 0:
-        items = await db.media_items.find({"folder_id": {"$in": descendant_ids}}).to_list(length=None)
+        # Only process active items — pending (in-progress uploads) are left to expire naturally
+        items = await db.media_items.find({"folder_id": {"$in": descendant_ids}, "status": "active"}).to_list(length=None)
         for item in items:
             _delete_item_r2_keys(item)
-        await db.media_items.delete_many({"folder_id": {"$in": descendant_ids}})
+        await db.media_items.delete_many({"folder_id": {"$in": descendant_ids}, "status": "active"})
 
     await db.media_folders.delete_many({"id": {"$in": descendant_ids}})
 
