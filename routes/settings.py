@@ -1042,3 +1042,59 @@ async def update_gallery_defaults(
     )
     return {"message": "Gallery defaults updated", "updated": list(filtered.keys())}
 
+
+# ─── Media Migration ──────────────────────────────────────────────────────────
+
+@router.post("/migrate-to-media")
+async def start_migration(
+    background_tasks: BackgroundTasks,
+    current_user: UserModel = Depends(require_role("owner")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """
+    Owner only. Starts a background migration of all deliverable and album files
+    into the Media library (new r2 key structure + MediaItem records).
+    """
+    agency_id = current_user.agency_id
+
+    # Prevent running two jobs simultaneously
+    running = await db.migration_jobs.find_one({"agency_id": agency_id, "status": "running"})
+    if running:
+        return {"job_id": running["job_id"], "status": "running", "message": "Migration already in progress"}
+
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "agency_id": agency_id,
+        "status": "queued",
+        "migrated": 0,
+        "failed": 0,
+        "errors": [],
+        "started_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "completed_at": None,
+    }
+    await db.migration_jobs.insert_one(job)
+
+    from services.media_migration import run_migration
+    background_tasks.add_task(run_migration, agency_id, job_id)
+
+    logger.info("Migration job started", extra={"data": {"agency_id": agency_id, "job_id": job_id}})
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.get("/migrate-to-media/status")
+async def get_migration_status(
+    current_user: UserModel = Depends(require_role("owner")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Owner only. Returns the most recent migration job for this agency."""
+    job = await db.migration_jobs.find_one(
+        {"agency_id": current_user.agency_id},
+        sort=[("started_at", -1)],
+    )
+    if not job:
+        return {"status": "not_started"}
+    return parse_mongo_data(job)
+
+

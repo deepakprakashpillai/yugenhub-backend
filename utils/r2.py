@@ -64,6 +64,17 @@ def upload_r2_object(r2_key: str, body: bytes, content_type: str):
     logger.info(f"Uploaded R2 object: {r2_key}")
 
 
+def copy_r2_object(src_key: str, dst_key: str):
+    """Copies an object within R2 (server-side copy — no download/upload)."""
+    client = get_r2_client()
+    client.copy_object(
+        Bucket=config.R2_BUCKET_NAME,
+        CopySource={"Bucket": config.R2_BUCKET_NAME, "Key": src_key},
+        Key=dst_key,
+    )
+    logger.info(f"Copied R2 object: {src_key} → {dst_key}")
+
+
 def delete_r2_object(r2_key: str):
     """Deletes an object from R2."""
     try:
