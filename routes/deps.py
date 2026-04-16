@@ -117,6 +117,20 @@ def require_finance_access():
     return checker
 
 
+def require_media_access():
+    """Dependency that checks if the user has media library access (owner/admin by role, or explicit media_access flag)."""
+    async def checker(current_user: UserModel = Depends(get_current_user)):
+        if current_user.role in ["owner", "admin"]:
+            return current_user
+        if getattr(current_user, "media_access", False):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Media library access is restricted."
+        )
+    return checker
+
+
 # ─── n8n Integration Auth ────────────────────────────────────────────────────
 
 from fastapi.security import APIKeyHeader

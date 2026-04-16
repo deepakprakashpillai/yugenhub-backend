@@ -92,3 +92,8 @@ portal_analytics_collection = AsyncCollectionProxy("portal_analytics")
 albums_collection = AsyncCollectionProxy("albums")
 album_analytics_collection = AsyncCollectionProxy("album_analytics")
 
+# Media Library
+media_folders_collection = AsyncCollectionProxy("media_folders")
+media_items_collection = AsyncCollectionProxy("media_items")
+bucket_stats_cache_collection = AsyncCollectionProxy("bucket_stats_cache")
+
