@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, HTTPException, Depends, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
+from bson import ObjectId
 import re
 # REMOVED raw collection imports
 from models.task import TaskModel, TaskHistoryModel
@@ -67,6 +68,43 @@ async def log_history(db: ScopedDatabase, task_id: str, user_id: str, changes: D
     if history_entries:
         await db.task_history.insert_many(history_entries)
 
+async def resolve_associate_assignment(db: ScopedDatabase, task_data: dict):
+    """
+    Resolve assigned_associate_id into assigned_to and incharge_user_id.
+    Modifies task_data in-place. Only applies to deliverable tasks.
+    Returns the associate doc if found, else None.
+    """
+    associate_id = task_data.get("assigned_associate_id")
+    if not associate_id:
+        return None
+
+    if task_data.get("category") != "deliverable":
+        raise HTTPException(status_code=400, detail="Associate assignment is only available for deliverable tasks")
+
+    try:
+        associate = await db.associates.find_one({"_id": ObjectId(associate_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid associate ID")
+
+    if not associate:
+        raise HTTPException(status_code=404, detail="Associate not found")
+
+    task_data["assigned_associate_name"] = associate["name"]
+
+    if associate.get("linked_user_id"):
+        # Associate has a YugenHub account — assign directly, no incharge needed
+        task_data["assigned_to"] = associate["linked_user_id"]
+        task_data["incharge_user_id"] = None
+    else:
+        # Freelancer without an account — incharge is required
+        incharge_id = task_data.get("incharge_user_id")
+        if not incharge_id:
+            raise HTTPException(status_code=400, detail="incharge_user_id is required when assigning to an associate without a YugenHub account")
+        task_data["assigned_to"] = incharge_id
+
+    return associate
+
+
 # --- ENDPOINTS ---
 
 @router.get("/grouped")
@@ -90,7 +128,10 @@ async def list_tasks_grouped(
         if context == "project_page" and project_id:
             pass
         else:
-            match_stage["assigned_to"] = current_user.id
+            match_stage["$or"] = [
+                {"assigned_to": current_user.id},
+                {"incharge_user_id": current_user.id}
+            ]
     elif assigned_to:
         match_stage["assigned_to"] = assigned_to
 
@@ -228,11 +269,17 @@ async def create_task(
     
     task.created_by = current_user.id
     task.studio_id = current_user.agency_id
-    
+
     # Validation: Project Tasks need Project ID
     if task.type == 'project' and not task.project_id:
         raise HTTPException(status_code=400, detail="Project tasks must have a project_id")
-    
+
+    # Resolve associate assignment (modifies task fields in-place)
+    if task.assigned_associate_id:
+        task_dict = task.model_dump()
+        await resolve_associate_assignment(db, task_dict)
+        task = TaskModel(**task_dict)
+
     result = await db.tasks.insert_one(task.model_dump())
     created_task = await db.tasks.find_one({"_id": result.inserted_id})
 
@@ -350,7 +397,10 @@ async def list_tasks(
         if context == "project_page" and project_id:
             pass  # Allow member to see all tasks in the project
         else:
-            match_stage["assigned_to"] = current_user.id
+            match_stage["$or"] = [
+                {"assigned_to": current_user.id},
+                {"incharge_user_id": current_user.id}
+            ]
     elif assigned_to:
         # Only allow filtering by assigned_to if NOT a member (Admins/Owners)
         match_stage["assigned_to"] = assigned_to
@@ -499,8 +549,9 @@ async def update_task(
     # Permissions
     is_owner_admin = current_user.role in ["owner", "admin"]
     is_assignee = existing_task.get("assigned_to") == current_user.id
-    
-    if not (is_owner_admin or is_assignee):
+    is_incharge = existing_task.get("incharge_user_id") == current_user.id
+
+    if not (is_owner_admin or is_assignee or is_incharge):
         logger.warning(f"Task update denied: not authorized", extra={"data": {"task_id": task_id, "role": current_user.role}})
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
     
@@ -523,6 +574,31 @@ async def update_task(
     
     if not changes:
         return parse_mongo_data(existing_task)
+
+    # Resolve associate assignment when being updated
+    if "assigned_associate_id" in update_data:
+        new_associate_id = update_data["assigned_associate_id"]
+        if new_associate_id:
+            # Merge with existing task to provide category context for validation
+            merged = {**existing_task, **update_data}
+            await resolve_associate_assignment(db, merged)
+            # Inject resolved fields back into update_data
+            update_data["assigned_to"] = merged["assigned_to"]
+            update_data["assigned_associate_name"] = merged["assigned_associate_name"]
+            update_data["incharge_user_id"] = merged.get("incharge_user_id")
+            # Reconcile assigned_to in changes: pre-resolve computation may have captured
+            # a false change (frontend sends assigned_to:null in associate mode).
+            # After resolution we know the actual new value, so correct changes accordingly.
+            old_assigned_to = existing_task.get("assigned_to")
+            new_assigned_to = merged["assigned_to"]
+            if old_assigned_to != new_assigned_to:
+                changes["assigned_to"] = (old_assigned_to, new_assigned_to)
+            elif "assigned_to" in changes:
+                del changes["assigned_to"]  # Remove false entry from pre-resolve null payload
+        else:
+            # Clearing associate — also clear related fields
+            update_data["assigned_associate_name"] = None
+            update_data["incharge_user_id"] = None
 
     # Update DB — only write valid model fields to prevent arbitrary field injection
     filtered_update = {k: v for k, v in update_data.items() if k in valid_fields}
