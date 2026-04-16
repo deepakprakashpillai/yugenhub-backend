@@ -80,6 +80,8 @@ class DeliverableFile(BaseModel):
     # Versioning fields
     version: int = 1
     previous_versions: List[FileVersion] = Field(default_factory=list)
+    # Media library link
+    media_item_id: Optional[str] = None
 
 class PortalDeliverableModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
