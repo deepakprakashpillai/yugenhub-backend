@@ -41,6 +41,9 @@ class TaskModel(BaseModel):
     
     # Assignment
     assigned_to: Optional[str] = None # user_id
+    assigned_associate_id: Optional[str] = None  # associates._id (deliverable tasks only)
+    assigned_associate_name: Optional[str] = None  # denormalized for display
+    incharge_user_id: Optional[str] = None  # supervising member's user_id (when associate has no account)
     created_by: Optional[str] = None # user_id (Set by backend)
     
     # Timing

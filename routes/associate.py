@@ -69,6 +69,21 @@ async def sync_inhouse_to_user(db: ScopedDatabase, associate_data: dict, agency_
     await db.users.insert_one(new_user)
     logger.info(f"Created user for in-house associate", extra={"data": {"email": email, "agency_id": agency_id}})
 
+@router.get("/active-simple")
+async def get_active_associates_simple(
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    """Lightweight list of active associates for assignment dropdowns."""
+    associates = await db.associates.find(
+        {"is_active": True},
+        {"name": 1, "primary_role": 1, "employment_type": 1, "linked_user_id": 1}
+    ).to_list(500)
+    for a in associates:
+        a["_id"] = str(a["_id"])
+    return associates
+
+
 @router.get("")
 async def get_associates(
     search: str = Query(None, description="Search by name, phone, or city"),
@@ -235,6 +250,19 @@ async def update_associate(
     
     # Sync to Users collection if In-house
     await sync_inhouse_to_user(db, updated_doc, current_user.agency_id)
+
+    # Reconcile tasks if linked_user_id was just set (associate got a YugenHub account)
+    if "linked_user_id" in update_data and update_data["linked_user_id"]:
+        new_linked_user_id = update_data["linked_user_id"]
+        result = await db.tasks.update_many(
+            {"assigned_associate_id": associate_id, "incharge_user_id": {"$ne": None}},
+            {"$set": {"assigned_to": new_linked_user_id, "incharge_user_id": None}}
+        )
+        if result.modified_count:
+            logger.info(
+                f"Reconciled tasks after associate linked to user",
+                extra={"data": {"associate_id": associate_id, "new_user_id": new_linked_user_id, "tasks_updated": result.modified_count}}
+            )
 
     logger.info(f"Associate updated", extra={"data": {"associate_id": associate_id, "fields": list(update_data.keys())}})
     updated_doc["_id"] = str(updated_doc["_id"])
