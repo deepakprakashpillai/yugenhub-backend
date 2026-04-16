@@ -261,7 +261,7 @@ async def list_folder_items(
 
     for item in items:
         if item.get("thumbnail_r2_key"):
-            item["thumbnail_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
+            item["thumbnail_r2_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
         if item.get("preview_r2_key"):
             item["preview_url"] = generate_presigned_get_url(item["preview_r2_key"], expires_in=3600)
 
@@ -398,7 +398,7 @@ async def delete_item(
     current_user: UserModel = Depends(require_media_access()),
     db: ScopedDatabase = Depends(get_db),
 ):
-    item = await db.media_items.find_one({"id": item_id})
+    item = await db.media_items.find_one({"id": item_id, "status": "active"})
     if not item:
         raise HTTPException(status_code=404, detail="Media item not found")
 
@@ -445,7 +445,7 @@ async def search_items(
     items = _parse_mongo(items)
     for item in items:
         if item.get("thumbnail_r2_key"):
-            item["thumbnail_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
+            item["thumbnail_r2_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
 
     return {"data": items, "count": len(items)}
 
@@ -491,7 +491,7 @@ async def revoke_share_link(
     db: ScopedDatabase = Depends(get_db),
 ):
     """Revoke the public share token for a media item."""
-    item = await db.media_items.find_one({"id": item_id})
+    item = await db.media_items.find_one({"id": item_id, "status": "active"})
     if not item:
         raise HTTPException(status_code=404, detail="Media item not found")
 

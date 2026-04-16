@@ -157,8 +157,14 @@ async def run_migration(agency_id: str, job_id: str):
 
                     # Copy main file
                     if not _copy_safe(old_key, new_key):
+                        # Source doesn't exist in R2 — mark as missing so we don't retry
+                        await raw_db.projects.update_one(
+                            {"_id": ObjectId(project_id)},
+                            {"$set": {"portal_deliverables.$[d].files.$[f].media_item_id": "__missing__"}},
+                            array_filters=[{"d.id": deliverable_id}, {"f.id": file_id}]
+                        )
                         failed += 1
-                        errors.append(f"Copy failed: {old_key}")
+                        errors.append(f"Source file missing in R2: {old_key}")
                         continue
 
                     # Repath derived keys
@@ -286,8 +292,14 @@ async def run_migration(agency_id: str, job_id: str):
                     new_key = _new_r2_key(agency_id, file_id, old_key)
 
                     if not _copy_safe(old_key, new_key):
+                        # Source doesn't exist — mark so we don't retry
+                        await raw_db.albums.update_one(
+                            {"id": album_id},
+                            {"$set": {"tabs.$[t].files.$[f].r2_key": None}},
+                            array_filters=[{"t.id": tab["id"]}, {"f.id": file_id}]
+                        )
                         failed += 1
-                        errors.append(f"Album copy failed: {old_key}")
+                        errors.append(f"Source file missing in R2: {old_key}")
                         continue
 
                     new_thumb_key = None
