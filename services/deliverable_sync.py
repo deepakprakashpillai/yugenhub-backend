@@ -31,10 +31,14 @@ async def on_deliverable_task_created(db, task: dict, project_id: str) -> None:
     event_id = task.get("event_id")
     deliverable_id = task.get("deliverable_id")
 
-    # Extract base deliverable type from task title (strip " (EventType)" suffix)
-    title_base = task.get("title", "Deliverable")
-    if " (" in title_base:
-        title_base = title_base.rsplit(" (", 1)[0]
+    # Use explicit name if set, otherwise extract base type from title
+    task_name = task.get("name")
+    if task_name:
+        title_base = task_name
+    else:
+        title_base = task.get("title", "Deliverable")
+        if " (" in title_base:
+            title_base = title_base.rsplit(" (", 1)[0]
 
     task_description = task.get("description", "")
     new_portal_deliverables = []
@@ -141,10 +145,12 @@ async def on_task_quantity_changed(db, task: dict, old_qty: int, new_qty: int, p
     if new_qty > old_qty:
         # Add more portal deliverables
         task_description = task.get("description", "")
+        task_name = task.get("name")
         new_items = []
         new_ids = list(portal_ids)
         for i in range(old_qty + 1, new_qty + 1):
-            title = title_base if new_qty == 1 else f"{title_base} {i}"
+            base = task_name if task_name else title_base
+            title = base if new_qty == 1 else f"{base} {i}"
             pd = PortalDeliverableModel(
                 title=title,
                 description=task_description or "",
@@ -484,9 +490,13 @@ async def reconcile_project(db, project_id: str) -> dict:
         existing = pd_by_task.get(task_id, [])
         current_count = len(existing)
 
-        title_base = task.get("title", "Deliverable")
-        if " (" in title_base:
-            title_base = title_base.rsplit(" (", 1)[0]
+        task_name = task.get("name")
+        if task_name:
+            title_base = task_name
+        else:
+            title_base = task.get("title", "Deliverable")
+            if " (" in title_base:
+                title_base = title_base.rsplit(" (", 1)[0]
 
         if current_count < qty:
             new_ids = list(task.get("portal_deliverable_ids", []))

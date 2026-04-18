@@ -251,6 +251,7 @@ async def create_project(
                 for deliverable in event.deliverables:
                     task = TaskModel(
                         title=f"{deliverable.name or deliverable.type} ({event.type})",
+                        name=deliverable.name or None,
                         description=deliverable.notes or f"Deliverable for {event.type}",
                         project_id=project_id,
                         event_id=event.id,
@@ -266,7 +267,7 @@ async def create_project(
                         quantity=deliverable.quantity,
                     )
                     all_new_tasks.append(task.model_dump())
-            
+
             # b. Send Notifications & Sync Attendees for Assignments
             if event.assignments:
                 for assignment in event.assignments:
@@ -870,6 +871,7 @@ async def add_event_to_project(
         for deliverable in event.deliverables:
             task = TaskModel(
                 title=f"{deliverable.name or deliverable.type} ({event.type})",
+                name=deliverable.name or None,
                 description=deliverable.notes or f"Deliverable for {event.type}",
                 project_id=project_id,
                 event_id=event.id,
@@ -1032,6 +1034,7 @@ async def update_event(
                 # New deliverable — create task
                 task = TaskModel(
                     title=f"{deliverable.get('name') or deliverable.get('type', 'Deliverable')} ({event_type})",
+                    name=deliverable.get('name') or None,
                     description=deliverable.get('notes') or f"Deliverable for {event_type}",
                     project_id=project_id,
                     event_id=event_id,
@@ -1056,20 +1059,21 @@ async def update_event(
                         raw_due = datetime.fromisoformat(raw_due)
                     except (ValueError, TypeError):
                         raw_due = None
+                new_deliv_name = deliverable.get('name') or None
+                new_deliv_type = deliverable.get('type', 'Deliverable')
+                display = new_deliv_name or new_deliv_type
                 task_set_fields = {
                     "due_date": raw_due,
                     "quantity": new_qty,
+                    "name": new_deliv_name,
+                    "description": deliverable.get('notes') or f"Deliverable for {event_type}",
                     "updated_at": datetime.now(timezone.utc),
                 }
-                # Only regenerate title if the deliverable type changed, to preserve
-                # any manual title edits the user made via TaskModal.
-                new_deliv_type = deliverable.get('type', 'Deliverable')
-                expected_title = f"{new_deliv_type} ({event_type})"
+                # Regenerate title if the display name (name or type) changed
                 existing_title = existing_task.get("title", "")
-                # Extract the base type from the existing title (strip " (EventType)" suffix)
                 existing_base = existing_title.rsplit(" (", 1)[0] if " (" in existing_title else existing_title
-                if existing_base != new_deliv_type:
-                    task_set_fields["title"] = expected_title
+                if existing_base != display:
+                    task_set_fields["title"] = f"{display} ({event_type})"
                 await db.tasks.update_one(
                     {"id": existing_task["id"]},
                     {"$set": task_set_fields}
@@ -1524,6 +1528,7 @@ async def revalidate_all_projects(
                         continue
                     task = TaskModel(
                         title=f"{deliv.get('name') or deliv.get('type', 'Deliverable')} ({event.get('type', 'Event')})",
+                        name=deliv.get('name') or None,
                         description=deliv.get('notes') or f"Deliverable for {event.get('type', 'Event')}",
                         project_id=project_id,
                         event_id=event.get("id"),
