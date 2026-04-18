@@ -17,6 +17,7 @@ from services.deliverable_sync import (
     on_deliverable_task_created, on_task_status_changed,
     on_task_quantity_changed, on_task_deleted,
 )
+from services.task_history import log_history
 import uuid
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
@@ -36,37 +37,6 @@ def parse_mongo_data(data):
             data = data.replace(tzinfo=timezone.utc)
         return data.isoformat()
     return data
-
-async def log_history(db: ScopedDatabase, task_id: str, user_id: str, changes: Dict[str, Any], comment: str = None):
-    """Log changes to task history"""
-    history_entries = []
-    timestamp = datetime.now(timezone.utc)
-    
-    # We need studio_id. Since we are in an agency context (ScopedDB), we can access it from db.agency_id
-    # However, db.agency_id is the string ID.
-    studio_id = db.agency_id
-    
-    # specific comment for blocked status
-    blocked_comment = comment if "status" in changes and changes["status"] == "blocked" else None
-    
-    # Generic comment if provided and not just for blocked
-    general_comment = comment if not blocked_comment else None
-
-    for field, (old_val, new_val) in changes.items():
-        entry = TaskHistoryModel(
-            task_id=task_id,
-            changed_by=user_id,
-            field=field,
-            old_value=str(old_val) if old_val is not None else None,
-            new_value=str(new_val) if new_val is not None else None,
-            comment=blocked_comment if field == "status" and new_val == "blocked" else general_comment,
-            studio_id=studio_id,
-            timestamp=timestamp
-        )
-        history_entries.append(entry.model_dump())
-    
-    if history_entries:
-        await db.task_history.insert_many(history_entries)
 
 async def resolve_associate_assignment(db: ScopedDatabase, task_data: dict):
     """

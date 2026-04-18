@@ -36,6 +36,7 @@ async def on_deliverable_task_created(db, task: dict, project_id: str) -> None:
     if " (" in title_base:
         title_base = title_base.rsplit(" (", 1)[0]
 
+    task_description = task.get("description", "")
     new_portal_deliverables = []
     portal_ids = []
 
@@ -43,6 +44,7 @@ async def on_deliverable_task_created(db, task: dict, project_id: str) -> None:
         title = title_base if quantity == 1 else f"{title_base} {i}"
         pd = PortalDeliverableModel(
             title=title,
+            description=task_description or "",
             event_id=event_id,
             deliverable_id=deliverable_id,
             task_id=task_id,
@@ -138,12 +140,14 @@ async def on_task_quantity_changed(db, task: dict, old_qty: int, new_qty: int, p
 
     if new_qty > old_qty:
         # Add more portal deliverables
+        task_description = task.get("description", "")
         new_items = []
         new_ids = list(portal_ids)
         for i in range(old_qty + 1, new_qty + 1):
             title = title_base if new_qty == 1 else f"{title_base} {i}"
             pd = PortalDeliverableModel(
                 title=title,
+                description=task_description or "",
                 event_id=task.get("event_id"),
                 deliverable_id=task.get("deliverable_id"),
                 task_id=task_id,
