@@ -67,6 +67,7 @@ async def create_template(
                 clean_evt["deliverables"].append({
                     "id": dev.get("id"),
                     "type": dev.get("type"),
+                    "name": dev.get("name"),
                     "quantity": dev.get("quantity", 1),
                     "notes": dev.get("notes"),
                     "status": "pending",
