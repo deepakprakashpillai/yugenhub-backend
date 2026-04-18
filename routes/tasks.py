@@ -250,6 +250,20 @@ async def create_task(
         await resolve_associate_assignment(db, task_dict)
         task = TaskModel(**task_dict)
 
+    # Append event type to title for event-linked deliverable tasks
+    if task.category == "deliverable" and task.event_id and task.project_id:
+        project_doc = await db.projects.find_one(
+            {"_id": ObjectId(task.project_id)},
+            {"events": 1}
+        )
+        if project_doc:
+            event = next((e for e in project_doc.get("events", []) if e.get("id") == task.event_id), None)
+            if event and event.get("type"):
+                event_type = event["type"]
+                suffix = f" ({event_type})"
+                if not task.title.endswith(suffix):
+                    task.title = f"{task.title}{suffix}"
+
     result = await db.tasks.insert_one(task.model_dump())
     created_task = await db.tasks.find_one({"_id": result.inserted_id})
 

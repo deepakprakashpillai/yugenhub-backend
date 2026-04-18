@@ -1451,6 +1451,7 @@ async def revalidate_all_projects(
       3. Missing deliverable tasks for event deliverables that were never synced
       4. Portal deliverable count mismatches (creates missing, removes empty excess)
       5. Task due_date stored as strings (converts to proper BSON Dates — fixes false overdue)
+      6. Deliverable task titles missing the ({event.type}) suffix (e.g. tasks created via TaskModal)
     """
     projects = await db.projects.find({}).to_list(length=None)
 
@@ -1474,6 +1475,7 @@ async def revalidate_all_projects(
         "event_dates_fixed": 0,
         "task_due_dates_fixed": task_due_date_fixed,
         "tasks_created": 0,
+        "task_titles_fixed": 0,
         "portal_deliverables_created": 0,
         "portal_deliverables_removed": 0,
         "errors": 0,
@@ -1550,6 +1552,27 @@ async def revalidate_all_projects(
                 for task_dict in new_tasks:
                     await on_deliverable_task_created(db, task_dict, project_id)
                     await log_history(db, task_dict["id"], current_user.id, {"creation": (None, "Task Created")})
+
+            # --- 2.5. Fix deliverable task titles missing the ({event.type}) suffix ---
+            event_type_by_id = {e.get("id"): e.get("type") for e in events if e.get("id") and e.get("type")}
+            # Re-fetch tasks to include any just-created ones
+            all_deliverable_tasks = await db.tasks.find({
+                "project_id": project_id,
+                "category": "deliverable",
+                "event_id": {"$exists": True, "$ne": None},
+            }).to_list(length=None)
+            for task in all_deliverable_tasks:
+                event_type = event_type_by_id.get(task.get("event_id"))
+                if not event_type:
+                    continue
+                title = task.get("title", "")
+                suffix = f" ({event_type})"
+                if not title.endswith(suffix):
+                    await db.tasks.update_one(
+                        {"id": task["id"]},
+                        {"$set": {"title": f"{title}{suffix}", "updated_at": datetime.now(timezone.utc)}}
+                    )
+                    stats["task_titles_fixed"] += 1
 
             # --- 3. Reconcile portal deliverables ---
             reconcile_result = await reconcile_project(db, project_id)
