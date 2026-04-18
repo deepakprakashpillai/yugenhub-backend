@@ -14,8 +14,9 @@ from config import config
 from utils.email import send_task_assignment_email
 from utils.push import send_push_notification
 from services.deliverable_sync import (
+    extract_title_base, build_deliverable_title,
     on_deliverable_task_created, on_task_status_changed,
-    on_task_quantity_changed, on_task_deleted,
+    on_task_quantity_changed, on_task_title_changed, on_task_deleted,
 )
 from services.task_history import log_history
 import uuid
@@ -250,7 +251,7 @@ async def create_task(
         await resolve_associate_assignment(db, task_dict)
         task = TaskModel(**task_dict)
 
-    # Append event type to title for event-linked deliverable tasks
+    # Build canonical title for event-linked deliverable tasks
     if task.category == "deliverable" and task.event_id and task.project_id:
         project_doc = await db.projects.find_one(
             {"_id": ObjectId(task.project_id)},
@@ -259,10 +260,8 @@ async def create_task(
         if project_doc:
             event = next((e for e in project_doc.get("events", []) if e.get("id") == task.event_id), None)
             if event and event.get("type"):
-                event_type = event["type"]
-                suffix = f" ({event_type})"
-                if not task.title.endswith(suffix):
-                    task.title = f"{task.title}{suffix}"
+                display = task.name or task.title
+                task.title = build_deliverable_title(display, event["type"])
 
     result = await db.tasks.insert_one(task.model_dump())
     created_task = await db.tasks.find_one({"_id": result.inserted_id})
@@ -584,6 +583,29 @@ async def update_task(
             update_data["assigned_associate_name"] = None
             update_data["incharge_user_id"] = None
 
+    # Regenerate canonical title for deliverable tasks when name or type changes
+    if (existing_task.get("category") == "deliverable"
+            and existing_task.get("event_id")
+            and existing_task.get("project_id")
+            and ("name" in update_data or "title" in update_data)):
+        project_doc = await db.projects.find_one(
+            {"_id": ObjectId(existing_task["project_id"])},
+            {"events": 1}
+        )
+        if project_doc:
+            event = next(
+                (e for e in project_doc.get("events", []) if e.get("id") == existing_task["event_id"]),
+                None
+            )
+            if event and event.get("type"):
+                new_name = update_data.get("name") if "name" in update_data else existing_task.get("name")
+                new_type_base = (update_data.get("title") if "title" in update_data
+                                 else extract_title_base(existing_task.get("title", "")))
+                display = new_name if new_name else new_type_base
+                update_data["title"] = build_deliverable_title(display, event["type"])
+                if "title" not in changes or changes["title"][1] != update_data["title"]:
+                    changes["title"] = (existing_task.get("title"), update_data["title"])
+
     # Update DB — only write valid model fields to prevent arbitrary field injection
     filtered_update = {k: v for k, v in update_data.items() if k in valid_fields}
     # Ensure due_date is stored as a BSON Date, not a string. If stored as a string,
@@ -614,6 +636,9 @@ async def update_task(
             project_id = existing_task.get("project_id")
             if project_id:
                 await on_task_quantity_changed(db, updated_task, old_q, new_q, project_id)
+        if "title" in changes and existing_task.get("project_id"):
+            new_base = updated_task.get("name") or extract_title_base(updated_task.get("title", ""))
+            await on_task_title_changed(db, updated_task, new_base, existing_task["project_id"])
 
     # --- NOTIFICATION LOGIC (UPDATE) ---
     if "assigned_to" in changes:

@@ -22,6 +22,18 @@ TASK_TO_PORTAL_STATUS = {
 }
 
 
+def extract_title_base(title: str) -> str:
+    """Strip the ' ({event_type})' suffix from a deliverable task title."""
+    if " (" in title:
+        return title.rsplit(" (", 1)[0]
+    return title
+
+
+def build_deliverable_title(display_name: str, event_type: str) -> str:
+    """Canonical task title: '{display_name} ({event_type})'."""
+    return f"{display_name} ({event_type})"
+
+
 async def on_deliverable_task_created(db, task: dict, project_id: str) -> None:
     """Auto-create portal deliverables based on task quantity.
     Sets task.portal_deliverable_ids and portal_deliverable.task_id.
@@ -31,14 +43,8 @@ async def on_deliverable_task_created(db, task: dict, project_id: str) -> None:
     event_id = task.get("event_id")
     deliverable_id = task.get("deliverable_id")
 
-    # Use explicit name if set, otherwise extract base type from title
     task_name = task.get("name")
-    if task_name:
-        title_base = task_name
-    else:
-        title_base = task.get("title", "Deliverable")
-        if " (" in title_base:
-            title_base = title_base.rsplit(" (", 1)[0]
+    title_base = task_name if task_name else extract_title_base(task.get("title", "Deliverable"))
 
     task_description = task.get("description", "")
     new_portal_deliverables = []
@@ -75,6 +81,44 @@ async def on_deliverable_task_created(db, task: dict, project_id: str) -> None:
     logger.info(
         "Created portal deliverables for task",
         extra={"data": {"task_id": task_id, "count": len(portal_ids), "project_id": project_id}}
+    )
+
+
+
+async def on_task_title_changed(db, task: dict, new_base: str, project_id: str) -> None:
+    """Propagate a task display-name change to its linked portal deliverable titles."""
+    portal_ids = task.get("portal_deliverable_ids", [])
+    if not portal_ids or not project_id:
+        return
+
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"portal_deliverables": 1}
+    )
+    if not project:
+        return
+
+    linked = [pd for pd in project.get("portal_deliverables", []) if pd.get("id") in set(portal_ids)]
+    if not linked:
+        return
+
+    now = datetime.now(timezone.utc)
+    qty = len(linked)
+    for i, pd in enumerate(linked, 1):
+        new_title = new_base if qty == 1 else f"{new_base} {i}"
+        if pd.get("title") != new_title:
+            await db.projects.update_one(
+                {"_id": ObjectId(project_id), "portal_deliverables.id": pd["id"]},
+                {"$set": {
+                    "portal_deliverables.$.title": new_title,
+                    "portal_deliverables.$.updated_on": now,
+                    "updated_on": now,
+                }}
+            )
+
+    logger.info(
+        "Updated portal deliverable titles",
+        extra={"data": {"task_id": task.get("id"), "new_base": new_base, "count": qty}}
     )
 
 
@@ -137,19 +181,16 @@ async def on_task_quantity_changed(db, task: dict, old_qty: int, new_qty: int, p
     task_id = task["id"]
     portal_ids = task.get("portal_deliverable_ids", [])
 
-    # Extract base title
-    title_base = task.get("title", "Deliverable")
-    if " (" in title_base:
-        title_base = title_base.rsplit(" (", 1)[0]
+    task_name = task.get("name")
+    title_base = task_name if task_name else extract_title_base(task.get("title", "Deliverable"))
 
     if new_qty > old_qty:
         # Add more portal deliverables
         task_description = task.get("description", "")
-        task_name = task.get("name")
         new_items = []
         new_ids = list(portal_ids)
         for i in range(old_qty + 1, new_qty + 1):
-            base = task_name if task_name else title_base
+            base = title_base
             title = base if new_qty == 1 else f"{base} {i}"
             pd = PortalDeliverableModel(
                 title=title,
@@ -491,12 +532,7 @@ async def reconcile_project(db, project_id: str) -> dict:
         current_count = len(existing)
 
         task_name = task.get("name")
-        if task_name:
-            title_base = task_name
-        else:
-            title_base = task.get("title", "Deliverable")
-            if " (" in title_base:
-                title_base = title_base.rsplit(" (", 1)[0]
+        title_base = task_name if task_name else extract_title_base(task.get("title", "Deliverable"))
 
         if current_count < qty:
             new_ids = list(task.get("portal_deliverable_ids", []))

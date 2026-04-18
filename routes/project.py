@@ -18,8 +18,9 @@ from utils.push import send_push_notification
 from utils.r2 import generate_presigned_put_url, delete_r2_object
 from automations.calendar import sync_event_to_calendar, sync_attendee_to_calendar
 from services.deliverable_sync import (
+    extract_title_base, build_deliverable_title,
     on_deliverable_task_created, on_task_status_changed,
-    on_task_quantity_changed, reconcile_project,
+    on_task_quantity_changed, on_task_title_changed, reconcile_project,
     on_portal_file_added, on_portal_file_removed,
 )
 from services.task_history import log_history
@@ -250,7 +251,7 @@ async def create_project(
             if event.deliverables:
                 for deliverable in event.deliverables:
                     task = TaskModel(
-                        title=f"{deliverable.name or deliverable.type} ({event.type})",
+                        title=build_deliverable_title(deliverable.name or deliverable.type, event.type),
                         name=deliverable.name or None,
                         description=deliverable.notes or f"Deliverable for {event.type}",
                         project_id=project_id,
@@ -870,7 +871,7 @@ async def add_event_to_project(
     if event.deliverables:
         for deliverable in event.deliverables:
             task = TaskModel(
-                title=f"{deliverable.name or deliverable.type} ({event.type})",
+                title=build_deliverable_title(deliverable.name or deliverable.type, event.type),
                 name=deliverable.name or None,
                 description=deliverable.notes or f"Deliverable for {event.type}",
                 project_id=project_id,
@@ -1024,7 +1025,7 @@ async def update_event(
         existing_tasks = await db.tasks.find({"project_id": project_id, "event_id": event_id, "category": "deliverable"}).to_list(length=None)
         existing_task_by_deliv_id = {t.get("deliverable_id"): t for t in existing_tasks if t.get("deliverable_id")}
         all_new_tasks = []
-        event_type = old_event.get("type", "Event")
+        event_type = update_data.get("type") or old_event.get("type", "Event")
 
         for deliverable in update_data["deliverables"]:
             deliv_id = deliverable.get("id")
@@ -1033,7 +1034,7 @@ async def update_event(
             if not existing_task:
                 # New deliverable — create task
                 task = TaskModel(
-                    title=f"{deliverable.get('name') or deliverable.get('type', 'Deliverable')} ({event_type})",
+                    title=build_deliverable_title(deliverable.get('name') or deliverable.get('type', 'Deliverable'), event_type),
                     name=deliverable.get('name') or None,
                     description=deliverable.get('notes') or f"Deliverable for {event_type}",
                     project_id=project_id,
@@ -1073,14 +1074,16 @@ async def update_event(
                 existing_title = existing_task.get("title", "")
                 existing_base = existing_title.rsplit(" (", 1)[0] if " (" in existing_title else existing_title
                 if existing_base != display:
-                    task_set_fields["title"] = f"{display} ({event_type})"
+                    task_set_fields["title"] = build_deliverable_title(display, event_type)
                 await db.tasks.update_one(
                     {"id": existing_task["id"]},
                     {"$set": task_set_fields}
                 )
-                # Sync portal deliverables if quantity changed
+                # Sync portal deliverables on title or quantity change
+                updated_task = await db.tasks.find_one({"id": existing_task["id"]})
+                if "title" in task_set_fields:
+                    await on_task_title_changed(db, updated_task, display, project_id)
                 if old_qty != new_qty:
-                    updated_task = await db.tasks.find_one({"id": existing_task["id"]})
                     await on_task_quantity_changed(db, updated_task, old_qty, new_qty, project_id)
 
         if all_new_tasks:
@@ -1089,6 +1092,26 @@ async def update_event(
                 await on_deliverable_task_created(db, task_dict, project_id)
                 await log_history(db, task_dict["id"], current_user.id, {"creation": (None, "Task Created")})
             logger.info(f"Created synced tasks from deliverables", extra={"data": {"count": len(all_new_tasks), "project_id": project_id}})
+
+    # If event type changed, regenerate all existing deliverable task titles
+    if "type" in update_data:
+        new_event_type = update_data["type"]
+        old_event_type = old_event.get("type", "")
+        if new_event_type and new_event_type != old_event_type:
+            all_event_tasks = await db.tasks.find({
+                "project_id": project_id,
+                "event_id": event_id,
+                "category": "deliverable",
+            }).to_list(length=None)
+            for t in all_event_tasks:
+                base = t.get("name") or extract_title_base(t.get("title", ""))
+                new_title = build_deliverable_title(base, new_event_type)
+                if t.get("title") != new_title:
+                    await db.tasks.update_one(
+                        {"id": t["id"]},
+                        {"$set": {"title": new_title, "updated_at": datetime.now(timezone.utc)}}
+                    )
+                    await on_task_title_changed(db, t, base, project_id)
 
     # Prefix keys with "events.$." to update the matched array element
     set_fields = {f"events.$.{k}": v for k, v in update_data.items()}
@@ -1529,7 +1552,7 @@ async def revalidate_all_projects(
                     if not deliv_id or deliv_id in synced_deliverable_ids:
                         continue
                     task = TaskModel(
-                        title=f"{deliv.get('name') or deliv.get('type', 'Deliverable')} ({event.get('type', 'Event')})",
+                        title=build_deliverable_title(deliv.get('name') or deliv.get('type', 'Deliverable'), event.get('type', 'Event')),
                         name=deliv.get('name') or None,
                         description=deliv.get('notes') or f"Deliverable for {event.get('type', 'Event')}",
                         project_id=project_id,
@@ -1565,13 +1588,14 @@ async def revalidate_all_projects(
                 event_type = event_type_by_id.get(task.get("event_id"))
                 if not event_type:
                     continue
-                title = task.get("title", "")
-                suffix = f" ({event_type})"
-                if not title.endswith(suffix):
+                base = task.get("name") or extract_title_base(task.get("title", ""))
+                correct_title = build_deliverable_title(base, event_type)
+                if task.get("title") != correct_title:
                     await db.tasks.update_one(
                         {"id": task["id"]},
-                        {"$set": {"title": f"{title}{suffix}", "updated_at": datetime.now(timezone.utc)}}
+                        {"$set": {"title": correct_title, "updated_at": datetime.now(timezone.utc)}}
                     )
+                    await on_task_title_changed(db, task, base, project_id)
                     stats["task_titles_fixed"] += 1
 
             # --- 3. Reconcile portal deliverables ---
