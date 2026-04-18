@@ -22,6 +22,7 @@ from services.deliverable_sync import (
     on_task_quantity_changed, reconcile_project,
     on_portal_file_added, on_portal_file_removed,
 )
+from services.task_history import log_history
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 logger = get_logger("projects")
@@ -249,8 +250,8 @@ async def create_project(
             if event.deliverables:
                 for deliverable in event.deliverables:
                     task = TaskModel(
-                        title=f"{deliverable.type} ({event.type})",
-                        description=f"Deliverable for {event.type}",
+                        title=f"{deliverable.name or deliverable.type} ({event.type})",
+                        description=deliverable.notes or f"Deliverable for {event.type}",
                         project_id=project_id,
                         event_id=event.id,
                         deliverable_id=deliverable.id,
@@ -295,9 +296,9 @@ async def create_project(
         
         if all_new_tasks:
             await db.tasks.insert_many(all_new_tasks)
-            # Auto-create portal deliverables for each task
             for task_dict in all_new_tasks:
                 await on_deliverable_task_created(db, task_dict, project_id)
+                await log_history(db, task_dict["id"], current_user.id, {"creation": (None, "Task Created")})
             logger.info(f"Created {len(all_new_tasks)} tasks during project creation", extra={"data": {"project_id": project_id}})
 
     # Auto-create a gallery album with one tab per event
@@ -868,8 +869,8 @@ async def add_event_to_project(
     if event.deliverables:
         for deliverable in event.deliverables:
             task = TaskModel(
-                title=f"{deliverable.type} ({event.type})",
-                description=f"Deliverable for {event.type}",
+                title=f"{deliverable.name or deliverable.type} ({event.type})",
+                description=deliverable.notes or f"Deliverable for {event.type}",
                 project_id=project_id,
                 event_id=event.id,
                 deliverable_id=deliverable.id,
@@ -887,9 +888,9 @@ async def add_event_to_project(
 
         if new_tasks:
             await db.tasks.insert_many(new_tasks)
-            # Auto-create portal deliverables for each task (same as create_project)
             for task_dict in new_tasks:
                 await on_deliverable_task_created(db, task_dict, project_id)
+                await log_history(db, task_dict["id"], current_user.id, {"creation": (None, "Task Created")})
             logger.info(f"Created tasks from deliverables", extra={"data": {"count": len(new_tasks), "event_type": event.type, "project_id": project_id}})
 
     # Sync: add a new tab to the linked gallery album for this event
@@ -1030,8 +1031,8 @@ async def update_event(
             if not existing_task:
                 # New deliverable — create task
                 task = TaskModel(
-                    title=f"{deliverable.get('type', 'Deliverable')} ({event_type})",
-                    description=f"Deliverable for {event_type}",
+                    title=f"{deliverable.get('name') or deliverable.get('type', 'Deliverable')} ({event_type})",
+                    description=deliverable.get('notes') or f"Deliverable for {event_type}",
                     project_id=project_id,
                     event_id=event_id,
                     deliverable_id=deliv_id,
@@ -1082,6 +1083,7 @@ async def update_event(
             await db.tasks.insert_many(all_new_tasks)
             for task_dict in all_new_tasks:
                 await on_deliverable_task_created(db, task_dict, project_id)
+                await log_history(db, task_dict["id"], current_user.id, {"creation": (None, "Task Created")})
             logger.info(f"Created synced tasks from deliverables", extra={"data": {"count": len(all_new_tasks), "project_id": project_id}})
 
     # Prefix keys with "events.$." to update the matched array element
@@ -1521,8 +1523,8 @@ async def revalidate_all_projects(
                     if not deliv_id or deliv_id in synced_deliverable_ids:
                         continue
                     task = TaskModel(
-                        title=f"{deliv.get('type', 'Deliverable')} ({event.get('type', 'Event')})",
-                        description=f"Deliverable for {event.get('type', 'Event')}",
+                        title=f"{deliv.get('name') or deliv.get('type', 'Deliverable')} ({event.get('type', 'Event')})",
+                        description=deliv.get('notes') or f"Deliverable for {event.get('type', 'Event')}",
                         project_id=project_id,
                         event_id=event.get("id"),
                         deliverable_id=deliv_id,
@@ -1542,6 +1544,7 @@ async def revalidate_all_projects(
                 await db.tasks.insert_many(new_tasks)
                 for task_dict in new_tasks:
                     await on_deliverable_task_created(db, task_dict, project_id)
+                    await log_history(db, task_dict["id"], current_user.id, {"creation": (None, "Task Created")})
 
             # --- 3. Reconcile portal deliverables ---
             reconcile_result = await reconcile_project(db, project_id)

@@ -7,6 +7,7 @@ import uuid
 class DeliverableModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: str
+    name: Optional[str] = None
     quantity: int = 1
     due_date: Optional[datetime] = None
     incharge_id: Optional[str] = None
