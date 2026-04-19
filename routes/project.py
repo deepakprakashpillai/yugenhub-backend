@@ -56,6 +56,10 @@ async def _resolve_project_name(project: dict, db: ScopedDatabase) -> str:
     def replacer(match):
         key = match.group(1).lower()
         val = lower_metadata.get(key, "")
+        if isinstance(val, dict):
+            # MapLocation — use formatted_address or address as the substitution
+            val = val.get("formatted_address") or val.get("address") or ""
+            return val.strip() if val else ""
         if val and isinstance(val, str):
             val = val.strip()
             return val.split(" ")[0] if val else ""
@@ -993,12 +997,43 @@ async def update_event(
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid Project ID")
 
-    # Whitelist allowed event fields to prevent arbitrary field injection
+    # Fetch project first so we can dynamically extend the whitelist with configured event fields
+    old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not old_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    old_event = next((e for e in old_project.get("events", []) if e.get("id") == event_id), None)
+    if not old_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # Whitelist allowed event fields to prevent arbitrary field injection.
+    # Extended at runtime with the vertical's configured event_fields so custom fields are persisted.
     ALLOWED_EVENT_FIELDS = {
         "type", "title", "start_date", "end_date", "venue_name", "venue_location",
+        "venue_map", "linked_locations",
         "notes", "assignments", "deliverables", "color", "is_confirmed", "team_requirements"
     }
+    vertical_id = old_project.get("vertical")
+    if vertical_id:
+        agency_config = await db.agency_configs.find_one({})
+        if agency_config:
+            for v in agency_config.get("verticals", []):
+                if v.get("id", "").lower() == vertical_id.lower():
+                    for field in v.get("event_fields", []):
+                        if fname := field.get("name"):
+                            ALLOWED_EVENT_FIELDS.add(fname)
+                    break
     update_data = {k: v for k, v in update_data.items() if k in ALLOWED_EVENT_FIELDS}
+
+    # Auto-fill venue_name / venue_location from venue_map when string fields are absent
+    if "venue_map" in update_data and isinstance(update_data.get("venue_map"), dict):
+        vm = update_data["venue_map"]
+        fa = vm.get("formatted_address") or vm.get("address") or ""
+        if fa:
+            if not update_data.get("venue_name"):
+                update_data.setdefault("venue_name", fa.split(",")[0].strip())
+            if not update_data.get("venue_location"):
+                update_data.setdefault("venue_location", fa)
 
     # Convert date strings to proper datetime objects so they're stored as BSON Dates.
     # Without this, date comparison queries (e.g. dashboard schedule) silently skip events.
@@ -1008,14 +1043,6 @@ async def update_event(
                 update_data[date_field] = datetime.fromisoformat(update_data[date_field])
             except (ValueError, TypeError):
                 raise HTTPException(status_code=400, detail=f"Invalid date format for field '{date_field}'")
-
-    old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
-    if not old_project:
-        raise HTTPException(status_code=404, detail="Project not found")
-        
-    old_event = next((e for e in old_project.get("events", []) if e.get("id") == event_id), None)
-    if not old_event:
-        raise HTTPException(status_code=404, detail="Event not found")
         
     # Always sync to calendar on any edit — ensures n8n stays consistent
     needs_calendar_sync = True

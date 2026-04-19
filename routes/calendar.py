@@ -114,7 +114,9 @@ async def get_calendar_events(
                     "project_code": project.get("code"),
                     "details": {
                         "venue": event.get("venue_name"),
-                        "status": "scheduled"  # Default as events don't have explicit status usually
+                        "venue_location": event.get("venue_location"),
+                        "maps_url": (event.get("venue_map") or {}).get("maps_url"),
+                        "status": "scheduled"
                     }
                 })
 

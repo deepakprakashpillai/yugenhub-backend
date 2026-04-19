@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 import uuid
 
+from models.location import MapLocation, LinkedLocation
+
 class DeliverableModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: str
@@ -32,6 +34,8 @@ class EventModel(BaseModel):
     start_date: datetime
     end_date: Optional[datetime] = None
     calendar_event_id: Optional[str] = None
+    venue_map: Optional[MapLocation] = None
+    linked_locations: List[LinkedLocation] = Field(default_factory=list)
     deliverables: List[DeliverableModel] = Field(default_factory=list)
     assignments: List[AssignmentModel] = Field(default_factory=list)
     team_requirements: List[TeamRequirement] = Field(default_factory=list)

@@ -5,6 +5,7 @@ from routes.deps import get_current_user, get_db, require_role
 from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from logging_config import get_logger
+from config import config as app_config
 
 # Helper function to parse MongoDB data, assuming it handles _id conversion
 # This function is not provided in the original code, but is implied by the change.
@@ -24,6 +25,13 @@ async def get_config(current_user: UserModel = Depends(get_current_user), db: Sc
     if not config:
         return {"agency_id": current_user.agency_id, "verticals": []} # Return empty default
     return parse_mongo_data(config)
+
+@router.get("/public")
+async def get_public_config(current_user: UserModel = Depends(get_current_user)):
+    """Return public, non-secret config values needed by the frontend."""
+    return {
+        "google_maps_browser_key": app_config.GOOGLE_MAPS_BROWSER_KEY or "",
+    }
 
 @router.post("/init")
 async def initialize_config(

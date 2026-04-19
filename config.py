@@ -47,6 +47,9 @@ class Config:
     R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "yugenhub-deliverables")
     R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")  # e.g. https://pub-xxx.r2.dev
 
+    # --- Google Maps Settings ---
+    GOOGLE_MAPS_BROWSER_KEY = os.getenv("GOOGLE_MAPS_BROWSER_KEY")  # HTTP-referrer restricted; used by frontend
+
     # --- Agent/LLM Settings ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
