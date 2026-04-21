@@ -131,6 +131,20 @@ def require_media_access():
     return checker
 
 
+def require_communications_access():
+    """Dependency that checks if the user has communications access (owner/admin by role, or explicit flag)."""
+    async def checker(current_user: UserModel = Depends(get_current_user)):
+        if current_user.role in ["owner", "admin"]:
+            return current_user
+        if getattr(current_user, "communications_access", False):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Communications access is restricted."
+        )
+    return checker
+
+
 # ─── n8n Integration Auth ────────────────────────────────────────────────────
 
 from fastapi.security import APIKeyHeader

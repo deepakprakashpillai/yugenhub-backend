@@ -8,6 +8,7 @@ class ClientModel(BaseModel):
     agency_id: str = "default"
     name: str
     phone: str
+    whatsapp_number: Optional[str] = None  # override for WA if different from phone; falls back to phone
     email: Optional[EmailStr] = None
     location: Optional[str] = None
     notes: Optional[str] = None

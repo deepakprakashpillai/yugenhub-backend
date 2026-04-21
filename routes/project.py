@@ -15,6 +15,8 @@ from logging_config import get_logger
 from config import config
 from utils.email import send_event_assignment_email
 from utils.push import send_push_notification
+from services.communication_generator import enqueue_message as enqueue_wa_message
+from models.communication import PROJECT_CONFIRMATION, PROJECT_STAGE_CHANGED
 from utils.r2 import generate_presigned_put_url, delete_r2_object
 from automations.calendar import sync_event_to_calendar, sync_attendee_to_calendar
 from services.deliverable_sync import (
@@ -320,8 +322,40 @@ async def create_project(
     except Exception as e:
         logger.error(f"Failed to auto-create gallery album for project {project_id}: {e}")
 
+    # WhatsApp — project confirmation to client
+    if project.client_id:
+        try:
+            org_config_wa = await db.agency_configs.find_one({})
+            agency_name_wa = (org_config_wa or {}).get("org_name", "")
+            deliverable_count = sum(
+                len(e.deliverables) for e in (project.events or []) if e.deliverables
+            )
+            first_event_date = None
+            if project.events:
+                dates = [e.start_date for e in project.events if e.start_date]
+                if dates:
+                    first_event_date = min(dates)
+            background_tasks.add_task(
+                enqueue_wa_message,
+                db=db,
+                agency_id=current_user.agency_id,
+                alert_type=PROJECT_CONFIRMATION,
+                recipient_client_id=project.client_id,
+                source={"kind": "project", "id": project_id},
+                render_ctx={
+                    "project_code": project_data["code"],
+                    "vertical": project_data.get("vertical", ""),
+                    "event_count": len(project.events or []),
+                    "deliverable_count": deliverable_count,
+                    "first_event_date": first_event_date,
+                    "agency_name": agency_name_wa,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Failed to queue project_confirmation WA message: {e}")
+
     logger.info(f"Project created with sequential code", extra={"data": {"code": project_data['code'], "vertical": project_data['vertical'], "event_count": len(project.events)}})
-    
+
     return parse_mongo_data(project_data)
 
 @router.get("")
@@ -937,7 +971,8 @@ async def update_project(
     old_project = await db.projects.find_one({"_id": ObjectId(project_id)})
     if not old_project:
         raise HTTPException(status_code=404, detail="Project not found")
-        
+
+    old_status = old_project.get("status")
     old_name = await _resolve_project_name(old_project, db)
 
     # Whitelist of fields that can be updated via this generic endpoint.
@@ -980,6 +1015,30 @@ async def update_project(
                         end_time=evt.get("end_date"),
                         calendar_event_id=evt.get("calendar_event_id")
                     )
+
+    # WhatsApp — notify client when project status changes
+    new_status = update_data.get("status")
+    if new_status and new_status != old_status and updated_project:
+        client_id = updated_project.get("client_id")
+        if client_id:
+            try:
+                org_config_wa = await db.agency_configs.find_one({})
+                agency_name_wa = (org_config_wa or {}).get("org_name", "")
+                background_tasks.add_task(
+                    enqueue_wa_message,
+                    db=db,
+                    agency_id=current_user.agency_id,
+                    alert_type=PROJECT_STAGE_CHANGED,
+                    recipient_client_id=client_id,
+                    source={"kind": "project", "id": project_id},
+                    render_ctx={
+                        "project_code": updated_project.get("code", ""),
+                        "new_status": new_status,
+                        "agency_name": agency_name_wa,
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Failed to queue project_stage_changed WA message: {e}")
 
     logger.info(f"Project updated", extra={"data": {"project_id": project_id, "fields": list(update_data.keys())}})
     return {"message": "Project updated successfully"}

@@ -50,6 +50,11 @@ class Config:
     # --- Google Maps Settings ---
     GOOGLE_MAPS_BROWSER_KEY = os.getenv("GOOGLE_MAPS_BROWSER_KEY")  # HTTP-referrer restricted; used by frontend
 
+    # --- Communications (WhatsApp Queue) Settings ---
+    # "manual" = operator opens wa.me link; "automation" = external webhook auto-sends
+    COMMUNICATIONS_SEND_MODE = os.getenv("COMMUNICATIONS_SEND_MODE", "manual")
+    COMMUNICATIONS_AUTOMATION_WEBHOOK_URL = os.getenv("COMMUNICATIONS_AUTOMATION_WEBHOOK_URL")
+
     # --- Agent/LLM Settings ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
