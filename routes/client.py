@@ -135,7 +135,7 @@ async def update_client(client_id: str, update_data: dict = Body(...), current_u
         raise HTTPException(status_code=400, detail="Invalid Client ID format")
 
     # Filter to allowed fields to prevent overwriting protected fields
-    allowed_fields = {"name", "phone", "email", "location", "type", "notes", "metadata", "total_projects"}
+    allowed_fields = {"name", "phone", "whatsapp_number", "email", "location", "type", "notes", "metadata", "total_projects"}
     update_data = {k: v for k, v in update_data.items() if k in allowed_fields}
     
     if not update_data:

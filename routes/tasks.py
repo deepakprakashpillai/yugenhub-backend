@@ -13,6 +13,8 @@ from logging_config import get_logger
 from config import config
 from utils.email import send_task_assignment_email
 from utils.push import send_push_notification
+from services.communication_generator import enqueue_message as enqueue_wa_message
+from models.communication import TASK_ASSIGNED
 from services.deliverable_sync import (
     extract_title_base, build_deliverable_title,
     on_deliverable_task_created, on_task_status_changed,
@@ -280,7 +282,7 @@ async def create_task(
         if task.project_id:
             project = await db.projects.find_one({"id": task.project_id})
             if project:
-                project_title = project.get("title")
+                project_title = project.get("code", "")
 
         # 2. Construct Rich Message
         assigner_name = current_user.name
@@ -336,9 +338,30 @@ async def create_task(
             message=message,
             url=f"/tasks?taskId={task.id}"
         )
-            
+
+        # 6. WhatsApp — notify the project's client
+        if task.project_id and project:
+            client_id = project.get("client_id")
+            if client_id:
+                org_config_wa = await db.agency_configs.find_one({})
+                agency_name_wa = (org_config_wa or {}).get("org_name", "")
+                background_tasks.add_task(
+                    enqueue_wa_message,
+                    db=db,
+                    agency_id=current_user.agency_id,
+                    alert_type=TASK_ASSIGNED,
+                    recipient_client_id=client_id,
+                    source={"kind": "task", "id": task.id},
+                    render_ctx={
+                        "task_title": task.title,
+                        "project_code": project.get("code", ""),
+                        "due_date": task.due_date,
+                        "agency_name": agency_name_wa,
+                    },
+                )
+
         logger.info(f"Task assignment notification sent", extra={"data": {"task_id": task.id, "assignee": task.assigned_to}})
-    
+
     logger.info(f"Task created", extra={"data": {"task_id": task.id, "title": task.title, "type": task.type, "project_id": task.project_id}})
     return parse_mongo_data(created_task)
 
@@ -653,7 +676,7 @@ async def update_task(
             if project_id:
                 project = await db.projects.find_one({"id": project_id})
                 if project:
-                    project_title = project.get("title")
+                    project_title = project.get("code", "")
 
             # 2. Construct Rich Message
             assigner_name = current_user.name
@@ -715,7 +738,30 @@ async def update_task(
                 message=message,
                 url=f"/tasks?taskId={task_id}"
             )
-            
+
+            # 6. WhatsApp — notify project client on reassignment
+            reassign_project_id = existing_task.get("project_id")
+            if reassign_project_id:
+                reassign_project = await db.projects.find_one({"id": reassign_project_id})
+                if reassign_project:
+                    reassign_client_id = reassign_project.get("client_id")
+                    if reassign_client_id:
+                        org_cfg_wa = await db.agency_configs.find_one({})
+                        background_tasks.add_task(
+                            enqueue_wa_message,
+                            db=db,
+                            agency_id=current_user.agency_id,
+                            alert_type=TASK_ASSIGNED,
+                            recipient_client_id=reassign_client_id,
+                            source={"kind": "task", "id": task_id},
+                            render_ctx={
+                                "task_title": current_title,
+                                "project_code": reassign_project.get("code", ""),
+                                "due_date": due_date,
+                                "agency_name": (org_cfg_wa or {}).get("org_name", ""),
+                            },
+                        )
+
             logger.info(f"Task reassignment notification sent", extra={"data": {"task_id": task_id, "new_assignee": new_assignee}})
     
     logger.info(f"Task updated", extra={"data": {"task_id": task_id, "fields_changed": list(changes.keys())}})

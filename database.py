@@ -97,3 +97,7 @@ media_folders_collection = AsyncCollectionProxy("media_folders")
 media_items_collection = AsyncCollectionProxy("media_items")
 bucket_stats_cache_collection = AsyncCollectionProxy("bucket_stats_cache")
 
+# Communications (WhatsApp Queue)
+communications_messages_collection = AsyncCollectionProxy("communications_messages")
+communication_settings_collection = AsyncCollectionProxy("communication_settings")
+

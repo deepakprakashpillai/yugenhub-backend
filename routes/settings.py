@@ -104,6 +104,7 @@ async def get_team(current_user: UserModel = Depends(get_current_user), db: Scop
             member["allowed_verticals"] = u.get("allowed_verticals", [])
             member["finance_access"] = u.get("finance_access", False)
             member["media_access"] = u.get("media_access", False)
+            member["communications_access"] = u.get("communications_access", False)
             member["can_manage_team"] = u.get("can_manage_team", False)
         result.append(member)
 
@@ -146,8 +147,9 @@ async def invite_user(
     role = invite_data.get("role", "member")
     associate_role = invite_data.get("associate_role", "Lead")
     allowed_verticals = invite_data.get("allowed_verticals", [])  # RBAC: vertical access
-    finance_access = invite_data.get("finance_access", False)     # RBAC: finance access
-    media_access = invite_data.get("media_access", False)         # RBAC: media library access
+    finance_access = invite_data.get("finance_access", False)             # RBAC: finance access
+    media_access = invite_data.get("media_access", False)                 # RBAC: media library access
+    communications_access = invite_data.get("communications_access", False)  # RBAC: communications access
 
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -168,6 +170,7 @@ async def invite_user(
         allowed_verticals = []
         finance_access = False
         media_access = False
+        communications_access = False
         # can_manage_team defaults to False and isn't setable by non-owners via invite anyway
 
     # Check if user already exists in this agency
@@ -193,6 +196,7 @@ async def invite_user(
         "allowed_verticals": allowed_verticals,
         "finance_access": finance_access,
         "media_access": media_access,
+        "communications_access": communications_access,
     }
 
     await db.users.insert_one(new_user)
@@ -396,6 +400,12 @@ async def update_user_access(
         if not isinstance(ma, bool):
             raise HTTPException(status_code=400, detail="media_access must be a boolean")
         update_fields["media_access"] = ma
+
+    if "communications_access" in access_data:
+        ca = access_data["communications_access"]
+        if not isinstance(ca, bool):
+            raise HTTPException(status_code=400, detail="communications_access must be a boolean")
+        update_fields["communications_access"] = ca
 
     if "can_manage_team" in access_data:
         cmt = access_data["can_manage_team"]

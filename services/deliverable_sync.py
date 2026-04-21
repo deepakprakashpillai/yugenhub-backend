@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from models.project import PortalDeliverableModel
 from logging_config import get_logger
 from bson import ObjectId
+from services.communication_generator import enqueue_message as enqueue_wa_message
+from models.communication import APPROVAL_REQUESTED, DELIVERABLE_UPLOADED
 
 logger = get_logger("deliverable_sync")
 
@@ -140,12 +142,13 @@ async def on_task_status_changed(db, task: dict, old_status: str, new_status: st
     # For other statuses, just set directly
     project = await db.projects.find_one(
         {"_id": ObjectId(project_id)},
-        {"portal_deliverables": 1}
+        {"portal_deliverables": 1, "client_id": 1, "agency_id": 1, "code": 1}
     )
     if not project:
         return
 
     now = datetime.now(timezone.utc)
+    updated_pd_count = 0
     for pd in project.get("portal_deliverables", []):
         if pd.get("id") not in portal_ids:
             continue
@@ -164,11 +167,49 @@ async def on_task_status_changed(db, task: dict, old_status: str, new_status: st
                 "updated_on": now,
             }}
         )
+        updated_pd_count += 1
 
     logger.info(
         "Propagated task status to portal deliverables",
         extra={"data": {"task_id": task["id"], "new_status": new_status, "portal_count": len(portal_ids)}}
     )
+
+    # WhatsApp — only fire when at least one PD was actually updated to "Uploaded"
+    if new_status == "review" and updated_pd_count > 0 and project:
+        client_id = project.get("client_id")
+        agency_id = project.get("agency_id")
+        if client_id and agency_id:
+            try:
+                org_config_wa = await db.agency_configs.find_one({})
+                agency_name_wa = (org_config_wa or {}).get("org_name", "")
+                task_title = task.get("title", "")
+                project_code = project.get("code", "")
+                await enqueue_wa_message(
+                    db=db,
+                    agency_id=agency_id,
+                    alert_type=APPROVAL_REQUESTED,
+                    recipient_client_id=client_id,
+                    source={"kind": "task", "id": task.get("id", "")},
+                    render_ctx={
+                        "project_code": project_code,
+                        "deliverable_name": task_title,
+                        "agency_name": agency_name_wa,
+                    },
+                )
+                await enqueue_wa_message(
+                    db=db,
+                    agency_id=agency_id,
+                    alert_type=DELIVERABLE_UPLOADED,
+                    recipient_client_id=client_id,
+                    source={"kind": "task", "id": f"du_{task.get('id', '')}"},
+                    render_ctx={
+                        "project_code": project_code,
+                        "deliverable_name": task_title,
+                        "agency_name": agency_name_wa,
+                    },
+                )
+            except Exception as exc:
+                logger.error(f"Failed to queue approval/uploaded WA messages: {exc}")
 
 
 async def on_task_quantity_changed(db, task: dict, old_qty: int, new_qty: int, project_id: str) -> None:
