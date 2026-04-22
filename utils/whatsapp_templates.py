@@ -188,6 +188,43 @@ def approval_requested(
     return "\n".join(lines)
 
 
+def task_assigned_associate(
+    associate_name: str,
+    task_title: str,
+    project_code: str,
+    due_date=None,
+    agency_name: str = "",
+) -> str:
+    lines = [
+        f"Hi {associate_name},",
+        "",
+        f"You've been assigned a task on project *{project_code}*:",
+        f"📋 *{task_title}*",
+    ]
+    if due_date:
+        lines.append(f"📅 Due: {_fmt_date(due_date)}")
+    if agency_name:
+        lines.extend(["", f"— {agency_name}"])
+    return "\n".join(lines)
+
+
+def task_deadline_associate(
+    associate_name: str,
+    task_title: str,
+    project_code: str,
+    due_date=None,
+    agency_name: str = "",
+) -> str:
+    lines = [
+        f"Reminder: *{task_title}* ({project_code}) is due soon.",
+    ]
+    if due_date:
+        lines.append(f"📅 Due: {_fmt_date(due_date)}")
+    if agency_name:
+        lines.extend(["", f"— {agency_name}"])
+    return "\n".join(lines)
+
+
 def deliverable_uploaded(
     client_name: str,
     project_code: str,

@@ -9,6 +9,8 @@ from logging_config import get_logger
 from middleware.db_guard import ScopedDatabase
 from models.communication import CommunicationMessage, ALL_ALERT_TYPES, ALERT_TYPE_LABELS, CUSTOM
 from models.communication_settings import CommunicationSettings, ClientAlertOverride, OperatorAlertOverride
+from models.communication_template import CommunicationTemplate, ALERT_TYPE_VARIABLES, DEFAULT_TEMPLATES
+from models.scheduler_config import SchedulerConfig
 from models.user import UserModel
 from routes.deps import get_db, require_communications_access, require_role, get_current_user
 from utils.whatsapp_sender import get_sender
@@ -42,6 +44,7 @@ async def list_messages(
     alert_type: Optional[str] = None,
     recipient_id: Optional[str] = None,
     status: Optional[str] = None,
+    send_channel: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     sort_by: str = Query("created_at", description="created_at or sent_at"),
@@ -59,6 +62,8 @@ async def list_messages(
         query["recipient_id"] = recipient_id
     if status:
         query["status"] = status
+    if send_channel in ("manual", "automation"):
+        query["send_channel"] = send_channel
     if date_from or date_to:
         date_filter: dict = {}
         if date_from:
@@ -111,9 +116,10 @@ async def create_message(
     current_user: UserModel = Depends(_dep),
     db: ScopedDatabase = Depends(get_db),
 ):
-    """Manually compose a custom message."""
+    """Manually compose a custom message. Supports recipient_type 'client' (default) or 'associate'."""
     message_body = (body.get("message_body") or "").strip()
     recipient_id = body.get("recipient_id", "")
+    recipient_type = body.get("recipient_type", "client")
     recipient_name = body.get("recipient_name", "")
     recipient_phone = body.get("recipient_phone", "")
 
@@ -121,21 +127,32 @@ async def create_message(
         raise HTTPException(status_code=400, detail="message_body is required")
     if not recipient_id:
         raise HTTPException(status_code=400, detail="recipient_id is required")
+
     if not recipient_phone:
-        # Try to resolve from DB — recipient_id is MongoDB _id string from the frontend
-        if ObjectId.is_valid(recipient_id):
-            client_doc = await db.clients.find_one({"_id": ObjectId(recipient_id)})
+        if recipient_type == "associate":
+            if ObjectId.is_valid(recipient_id):
+                assoc_doc = await db.associates.find_one({"_id": ObjectId(recipient_id)})
+            else:
+                assoc_doc = await db.associates.find_one({"id": recipient_id})
+            if assoc_doc:
+                recipient_phone = assoc_doc.get("phone_number", "").strip()
+                recipient_name = recipient_name or assoc_doc.get("name", "")
         else:
-            client_doc = await db.clients.find_one({"id": recipient_id})
-        if client_doc:
-            from utils.phone import resolve_whatsapp_number
-            recipient_phone = resolve_whatsapp_number(client_doc) or ""
-            recipient_name = recipient_name or client_doc.get("name", "")
+            if ObjectId.is_valid(recipient_id):
+                client_doc = await db.clients.find_one({"_id": ObjectId(recipient_id)})
+            else:
+                client_doc = await db.clients.find_one({"id": recipient_id})
+            if client_doc:
+                from utils.phone import resolve_whatsapp_number
+                recipient_phone = resolve_whatsapp_number(client_doc) or ""
+                recipient_name = recipient_name or client_doc.get("name", "")
+
     if not recipient_phone:
         raise HTTPException(status_code=400, detail="recipient_phone is required and could not be resolved")
 
     msg = CommunicationMessage(
         agency_id=current_user.agency_id,
+        recipient_type=recipient_type,
         recipient_id=recipient_id,
         recipient_name=recipient_name,
         recipient_phone=recipient_phone,
@@ -298,6 +315,8 @@ async def update_settings(
     }
     if enabled_types is not None:
         update_doc["globally_enabled_types"] = enabled_types
+    if "team_notifications_enabled" in body:
+        update_doc["team_notifications_enabled"] = bool(body["team_notifications_enabled"])
 
     base = CommunicationSettings(agency_id=current_user.agency_id).model_dump()
     set_on_insert = {k: v for k, v in base.items() if k not in update_doc}
@@ -309,3 +328,338 @@ async def update_settings(
 
     logger.info("Communication settings updated", extra={"data": {"by": current_user.id}})
     return {"message": "Settings updated"}
+
+
+# ─── Templates ────────────────────────────────────────────────────────────────
+
+@router.get("/templates")
+async def list_templates(
+    current_user: UserModel = Depends(_dep),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Return all alert types with their current template (custom or default)."""
+    custom_docs = await db.communication_templates.find({}).to_list(length=None)
+    custom_by_type = {d["alert_type"]: d for d in custom_docs}
+
+    result = []
+    for alert_type in ALL_ALERT_TYPES:
+        if alert_type == CUSTOM:
+            continue
+        doc = custom_by_type.get(alert_type)
+        result.append({
+            "alert_type": alert_type,
+            "label": ALERT_TYPE_LABELS.get(alert_type, alert_type),
+            "body_template": doc["body_template"] if doc else DEFAULT_TEMPLATES.get(alert_type, ""),
+            "is_custom": doc is not None,
+            "default_template": DEFAULT_TEMPLATES.get(alert_type, ""),
+            "variables": ALERT_TYPE_VARIABLES.get(alert_type, []),
+        })
+    return result
+
+
+@router.put("/templates/{alert_type}")
+async def upsert_template(
+    alert_type: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    if alert_type not in ALL_ALERT_TYPES or alert_type == CUSTOM:
+        raise HTTPException(status_code=400, detail="Invalid alert type")
+    body_template = (body.get("body_template") or "").strip()
+    if not body_template:
+        raise HTTPException(status_code=400, detail="body_template is required")
+
+    tpl = CommunicationTemplate(
+        agency_id=current_user.agency_id,
+        alert_type=alert_type,
+        body_template=body_template,
+        updated_by=current_user.id,
+    )
+    await db.communication_templates.update_one(
+        {"alert_type": alert_type},
+        {"$set": tpl.model_dump()},
+        upsert=True,
+    )
+    logger.info("Communication template saved", extra={"data": {"alert_type": alert_type, "by": current_user.id}})
+    return {"alert_type": alert_type, "saved": True}
+
+
+@router.delete("/templates/{alert_type}", status_code=204)
+async def reset_template(
+    alert_type: str,
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    await db.communication_templates.delete_one({"alert_type": alert_type})
+    logger.info("Communication template reset to default", extra={"data": {"alert_type": alert_type}})
+
+
+# ─── Scheduler config ─────────────────────────────────────────────────────────
+
+@router.get("/scheduler-config")
+async def get_scheduler_config(
+    current_user: UserModel = Depends(_dep),
+    db: ScopedDatabase = Depends(get_db),
+):
+    doc = await db.scheduler_configs.find_one({})
+    if not doc:
+        return _parse_mongo(SchedulerConfig(agency_id=current_user.agency_id).model_dump())
+    return _parse_mongo(doc)
+
+
+@router.patch("/scheduler-config")
+async def update_scheduler_config(
+    body: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    allowed = {
+        "task_deadline_enabled", "task_deadline_hours_before",
+        "invoice_scan_enabled", "invoice_due_soon_days_before",
+    }
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    updates["updated_at"] = datetime.now(timezone.utc)
+    base = SchedulerConfig(agency_id=current_user.agency_id).model_dump()
+    await db.scheduler_configs.update_one(
+        {},
+        {"$set": updates, "$setOnInsert": base},
+        upsert=True,
+    )
+    logger.info("Scheduler config updated", extra={"data": {"by": current_user.id}})
+    return {"updated": True}
+
+
+@router.post("/scheduler/run-now/{job_name}")
+async def scheduler_run_now(
+    job_name: str,
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Trigger an immediate scan for the current agency."""
+    from services.communication_scheduler import (
+        run_task_deadline_for_agency,
+        run_task_deadline_associate_for_agency,
+        run_invoice_scan_for_agency,
+    )
+
+    cfg_doc = await db.scheduler_configs.find_one({})
+    _known = {"task_deadline_enabled", "task_deadline_hours_before", "invoice_scan_enabled", "invoice_due_soon_days_before"}
+    cfg_data = {"agency_id": current_user.agency_id, **{k: v for k, v in (cfg_doc or {}).items() if k in _known}}
+    cfg = SchedulerConfig(**cfg_data)
+
+    if job_name == "task_deadline":
+        count = await run_task_deadline_for_agency(db, current_user.agency_id, cfg.task_deadline_hours_before)
+        return {"job": job_name, "queued": count}
+    if job_name == "task_deadline_associate":
+        count = await run_task_deadline_associate_for_agency(db, current_user.agency_id, cfg.task_deadline_hours_before)
+        return {"job": job_name, "queued": count}
+    if job_name == "invoice":
+        count = await run_invoice_scan_for_agency(db, current_user.agency_id, cfg.invoice_due_soon_days_before)
+        return {"job": job_name, "queued": count}
+    raise HTTPException(status_code=400, detail="Unknown job name")
+
+
+# ─── Blast ────────────────────────────────────────────────────────────────────
+
+_BLAST_TYPES = {"task_deadline", "invoice_due_soon", "invoice_overdue", "approval_requested"}
+
+
+async def _build_blast_candidates(
+    alert_type: str,
+    agency_id: str,
+    db: ScopedDatabase,
+) -> list[dict]:
+    """Return list of candidate blast items without enqueuing."""
+    from database import db as raw_db
+    from bson import ObjectId as ObjId
+    from services.communication_generator import _render_body, _render_custom_template
+
+    now = datetime.now(timezone.utc)
+    candidates = []
+
+    # Resolve custom template if any
+    custom_tpl = await db.communication_templates.find_one({"alert_type": alert_type})
+
+    def _render(ctx: dict) -> str:
+        if custom_tpl and custom_tpl.get("body_template"):
+            return _render_custom_template(custom_tpl["body_template"], ctx)
+        return _render_body(alert_type, ctx) or ""
+
+    if alert_type == "task_deadline":
+        window_end = now + timedelta(hours=24)
+        cursor = raw_db.tasks.find({
+            "$or": [{"studio_id": agency_id}, {"agency_id": agency_id}],
+            "due_date": {"$gte": now, "$lte": window_end},
+            "status": {"$nin": ["done", "completed"]},
+        })
+        async for task in cursor:
+            project_id = task.get("project_id")
+            client_id = None
+            project_code = ""
+            if project_id:
+                try:
+                    project = await raw_db.projects.find_one({"_id": ObjId(project_id)})
+                except Exception:
+                    project = await raw_db.projects.find_one({"id": project_id})
+                if project:
+                    client_id = project.get("client_id")
+                    project_code = project.get("code", "")
+            if not client_id:
+                continue
+            if ObjId.is_valid(client_id):
+                client = await raw_db.clients.find_one({"_id": ObjId(client_id)})
+            else:
+                client = await raw_db.clients.find_one({"id": client_id})
+            if not client:
+                continue
+            ctx = {
+                "client_name": client.get("name", "there"),
+                "task_title": task.get("title", ""),
+                "project_code": project_code,
+                "due_date": task.get("due_date"),
+                "agency_name": "",
+            }
+            candidates.append({
+                "recipient_id": str(client.get("_id", client.get("id", ""))),
+                "recipient_name": client.get("name", ""),
+                "recipient_phone": client.get("whatsapp_number") or client.get("phone", ""),
+                "message_preview": _render(ctx),
+                "source": {"kind": "task", "id": str(task.get("id", task.get("_id", "")))},
+                "render_ctx": {k: str(v) if hasattr(v, "isoformat") else v for k, v in ctx.items()},
+            })
+
+    elif alert_type in ("invoice_due_soon", "invoice_overdue"):
+        cursor = raw_db.finance_invoices.find({"agency_id": agency_id, "status": {"$nin": ["paid", "cancelled"]}})
+        async for invoice in cursor:
+            due_date = invoice.get("due_date")
+            if not due_date:
+                continue
+            if isinstance(due_date, str):
+                try:
+                    due_date = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            is_due_soon = now <= due_date <= now + timedelta(days=3)
+            is_overdue = due_date < now
+            if alert_type == "invoice_due_soon" and not is_due_soon:
+                continue
+            if alert_type == "invoice_overdue" and not is_overdue:
+                continue
+
+            client_id = invoice.get("client_id")
+            if not client_id:
+                continue
+            if ObjId.is_valid(client_id):
+                client = await raw_db.clients.find_one({"_id": ObjId(client_id)})
+            else:
+                client = await raw_db.clients.find_one({"id": client_id})
+            if not client:
+                continue
+            ctx = {
+                "client_name": client.get("name", "there"),
+                "invoice_no": invoice.get("invoice_no", ""),
+                "amount": invoice.get("total_amount", 0),
+                "currency": invoice.get("currency", "INR"),
+                "due_date": due_date,
+                "agency_name": "",
+            }
+            candidates.append({
+                "recipient_id": str(client.get("_id", client.get("id", ""))),
+                "recipient_name": client.get("name", ""),
+                "recipient_phone": client.get("whatsapp_number") or client.get("phone", ""),
+                "message_preview": _render(ctx),
+                "source": {"kind": "invoice", "id": str(invoice.get("id", invoice.get("_id", "")))},
+                "render_ctx": {k: str(v) if hasattr(v, "isoformat") else v for k, v in ctx.items()},
+            })
+
+    elif alert_type == "approval_requested":
+        cursor = raw_db.projects.find({"agency_id": agency_id})
+        async for project in cursor:
+            client_id = project.get("client_id")
+            if not client_id:
+                continue
+            for pd in project.get("portal_deliverables", []):
+                if pd.get("status") not in ("Pending", "pending"):
+                    continue
+                if ObjId.is_valid(client_id):
+                    client = await raw_db.clients.find_one({"_id": ObjId(client_id)})
+                else:
+                    client = await raw_db.clients.find_one({"id": client_id})
+                if not client:
+                    continue
+                ctx = {
+                    "client_name": client.get("name", "there"),
+                    "project_code": project.get("code", ""),
+                    "deliverable_name": pd.get("name", ""),
+                    "agency_name": "",
+                }
+                candidates.append({
+                    "recipient_id": str(client.get("_id", client.get("id", ""))),
+                    "recipient_name": client.get("name", ""),
+                    "recipient_phone": client.get("whatsapp_number") or client.get("phone", ""),
+                    "message_preview": _render(ctx),
+                    "source": {"kind": "project", "id": str(project.get("_id", ""))},
+                    "render_ctx": ctx,
+                })
+
+    return candidates
+
+
+@router.post("/blast/preview")
+async def blast_preview(
+    body: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    alert_type = body.get("alert_type", "")
+    if alert_type not in _BLAST_TYPES:
+        raise HTTPException(status_code=400, detail=f"Blast not supported for alert type: {alert_type}")
+
+    items = await _build_blast_candidates(alert_type, current_user.agency_id, db)
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/blast/send")
+async def blast_send(
+    body: dict = Body(...),
+    current_user: UserModel = Depends(require_role("owner", "admin")),
+    db: ScopedDatabase = Depends(get_db),
+):
+    alert_type = body.get("alert_type", "")
+    if alert_type not in _BLAST_TYPES:
+        raise HTTPException(status_code=400, detail=f"Blast not supported for alert type: {alert_type}")
+
+    items = body.get("items", [])
+    if not items:
+        raise HTTPException(status_code=400, detail="items list is required")
+
+    from services.communication_generator import enqueue_message as _enqueue
+    queued = 0
+    skipped = 0
+
+    for item in items:
+        recipient_id = item.get("recipient_id", "")
+        source = item.get("source", {})
+        render_ctx = item.get("render_ctx", {})
+
+        msg = await _enqueue(
+            db=db,
+            agency_id=current_user.agency_id,
+            alert_type=alert_type,
+            recipient_client_id=recipient_id,
+            source=source,
+            render_ctx=render_ctx,
+            created_by=current_user.id,
+            skip_dedup=False,
+        )
+        if msg:
+            queued += 1
+        else:
+            skipped += 1
+
+    logger.info("Blast sent", extra={"data": {"alert_type": alert_type, "queued": queued, "skipped": skipped}})
+    return {"queued": queued, "skipped": skipped}

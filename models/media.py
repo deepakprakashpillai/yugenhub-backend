@@ -15,6 +15,12 @@ class MediaFolder(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # Folder sharing
+    share_token: Optional[str] = None
+    share_expires_at: Optional[datetime] = None
+    share_include_subfolders: bool = False
+    share_allow_download: bool = True
+
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True, extra="ignore")
 
 

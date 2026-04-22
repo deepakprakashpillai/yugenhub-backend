@@ -236,6 +236,186 @@ async def delete_folder(
     await db.media_folders.delete_many({"id": {"$in": descendant_ids}})
 
 
+# ─── Folder Share Endpoints ───────────────────────────────────────────────────
+
+@router.post("/folders/{folder_id}/share")
+async def create_folder_share_link(
+    folder_id: str,
+    data: dict = Body(default={}),
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Generate (or refresh) a public share token for a folder."""
+    folder = await db.media_folders.find_one({"id": folder_id})
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    expires_in_days: Optional[int] = data.get("expires_in_days")
+    include_subfolders: bool = bool(data.get("include_subfolders", False))
+    allow_download: bool = bool(data.get("allow_download", True))
+
+    expires_at = None
+    if expires_in_days is not None:
+        if not isinstance(expires_in_days, int) or expires_in_days < 1:
+            raise HTTPException(status_code=400, detail="expires_in_days must be a positive integer")
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+
+    await db.media_folders.update_one(
+        {"id": folder_id},
+        {"$set": {
+            "share_token": token,
+            "share_expires_at": expires_at,
+            "share_include_subfolders": include_subfolders,
+            "share_allow_download": allow_download,
+            "updated_at": now,
+        }}
+    )
+
+    share_url = f"{config.FRONTEND_URL[0]}/folder-share/{token}"
+    logger.info("Folder share link created", extra={"data": {"folder_id": folder_id}})
+    return {
+        "share_url": share_url,
+        "token": token,
+        "expires_at": expires_at,
+        "include_subfolders": include_subfolders,
+        "allow_download": allow_download,
+    }
+
+
+@router.delete("/folders/{folder_id}/share", status_code=204)
+async def revoke_folder_share_link(
+    folder_id: str,
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Revoke the public share token for a folder."""
+    folder = await db.media_folders.find_one({"id": folder_id})
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    await db.media_folders.update_one(
+        {"id": folder_id},
+        {"$set": {
+            "share_token": None,
+            "share_expires_at": None,
+            "updated_at": datetime.now(timezone.utc),
+        }}
+    )
+    logger.info("Folder share link revoked", extra={"data": {"folder_id": folder_id}})
+
+
+def _check_folder_share_valid(folder: dict) -> None:
+    """Raise HTTPException if share token is missing or expired."""
+    expires_at = folder.get("share_expires_at")
+    if expires_at:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=410, detail="Share link has expired")
+
+
+async def _get_shared_folder_ids(folder: dict) -> List[str]:
+    """Return all folder IDs covered by this share (including subfolders if enabled)."""
+    folder_ids = [folder["id"]]
+    if folder.get("share_include_subfolders"):
+        queue = [folder["id"]]
+        while queue:
+            current = queue.pop()
+            children = await raw_db.media_folders.find({"parent_id": current}).to_list(length=None)
+            for child in children:
+                folder_ids.append(child["id"])
+                queue.append(child["id"])
+    return folder_ids
+
+
+@router.get("/folder-share/{token}")
+async def resolve_folder_share(token: str):
+    """Public endpoint — no auth required. Returns folder metadata for a share token."""
+    folder = await raw_db.media_folders.find_one({"share_token": token})
+    if not folder:
+        raise HTTPException(status_code=404, detail="Share link not found")
+
+    _check_folder_share_valid(folder)
+
+    agency_id = folder.get("agency_id")
+    agency_config = await raw_db.agency_configs.find_one({"agency_id": agency_id})
+    agency_name = (agency_config or {}).get("org_name", "")
+
+    return {
+        "folder_id": folder["id"],
+        "folder_name": folder["name"],
+        "agency_name": agency_name,
+        "allow_download": folder.get("share_allow_download", True),
+        "include_subfolders": folder.get("share_include_subfolders", False),
+        "expires_at": folder.get("share_expires_at"),
+    }
+
+
+@router.get("/folder-share/{token}/items")
+async def folder_share_items(
+    token: str,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Public endpoint — no auth required. Paginated items in a shared folder."""
+    folder = await raw_db.media_folders.find_one({"share_token": token})
+    if not folder:
+        raise HTTPException(status_code=404, detail="Share link not found")
+
+    _check_folder_share_valid(folder)
+    folder_ids = await _get_shared_folder_ids(folder)
+
+    skip = (page - 1) * limit
+    items = await raw_db.media_items.find(
+        {"folder_id": {"$in": folder_ids}, "status": "active"}
+    ).skip(skip).limit(limit).to_list(length=limit)
+    total = await raw_db.media_items.count_documents({"folder_id": {"$in": folder_ids}, "status": "active"})
+
+    items = _parse_mongo(items)
+    for item in items:
+        if item.get("thumbnail_r2_key"):
+            item["thumbnail_r2_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
+        for sensitive in ("r2_key", "r2_url", "preview_r2_key", "watermark_r2_key"):
+            item.pop(sensitive, None)
+
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": (total + limit - 1) // limit,
+        "allow_download": folder.get("share_allow_download", True),
+        "data": items,
+    }
+
+
+@router.get("/folder-share/{token}/items/{item_id}/download")
+async def folder_share_item_download(token: str, item_id: str):
+    """Public endpoint — no auth required. Returns a presigned download URL."""
+    folder = await raw_db.media_folders.find_one({"share_token": token})
+    if not folder:
+        raise HTTPException(status_code=404, detail="Share link not found")
+
+    if not folder.get("share_allow_download", True):
+        raise HTTPException(status_code=403, detail="Downloads are disabled for this share link")
+
+    _check_folder_share_valid(folder)
+    folder_ids = await _get_shared_folder_ids(folder)
+
+    item = await raw_db.media_items.find_one({
+        "id": item_id,
+        "folder_id": {"$in": folder_ids},
+        "status": "active",
+    })
+    if not item:
+        raise HTTPException(status_code=404, detail="File not found in this share")
+
+    url = generate_presigned_get_url(item["r2_key"], expires_in=300)
+    return {"url": url, "file_name": item["name"], "content_type": item["content_type"]}
+
+
 # ─── File Endpoints ───────────────────────────────────────────────────────────
 
 @router.get("/folders/{folder_id}/items")
@@ -362,6 +542,62 @@ async def register_file(
     return {"id": media_item_id, "status": "active"}
 
 
+@router.delete("/items/bulk", status_code=204)
+async def bulk_delete_items(
+    data: dict = Body(...),
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Delete multiple media items at once."""
+    ids = data.get("ids", [])
+    if not ids or not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="ids must be a non-empty list")
+    if len(ids) > 200:
+        raise HTTPException(status_code=400, detail="Maximum 200 items per bulk operation")
+
+    items = await db.media_items.find({"id": {"$in": ids}, "status": "active"}).to_list(length=None)
+    for item in items:
+        _delete_item_r2_keys(item)
+        if item.get("source") == "deliverable" and item.get("source_project_id") and item.get("source_deliverable_id"):
+            await _cascade_deliverable_unlink(
+                project_id=item["source_project_id"],
+                deliverable_id=item["source_deliverable_id"],
+                media_item_id=item["id"],
+            )
+
+    await db.media_items.delete_many({"id": {"$in": ids}})
+    logger.info("Bulk media items deleted", extra={"data": {"count": len(items)}})
+
+
+@router.patch("/items/bulk-move")
+async def bulk_move_items(
+    data: dict = Body(...),
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Move multiple media items to a different folder."""
+    ids = data.get("ids", [])
+    folder_id = data.get("folder_id")
+    if not ids or not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="ids must be a non-empty list")
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="folder_id is required")
+    if len(ids) > 200:
+        raise HTTPException(status_code=400, detail="Maximum 200 items per bulk operation")
+
+    folder = await db.media_folders.find_one({"id": folder_id})
+    if not folder:
+        raise HTTPException(status_code=404, detail="Target folder not found")
+
+    now = datetime.now(timezone.utc)
+    result = await db.media_items.update_many(
+        {"id": {"$in": ids}, "status": "active"},
+        {"$set": {"folder_id": folder_id, "updated_at": now}},
+    )
+    logger.info("Bulk media items moved", extra={"data": {"count": result.modified_count, "folder_id": folder_id}})
+    return {"moved": result.modified_count}
+
+
 @router.patch("/items/{item_id}")
 async def update_item(
     item_id: str,
@@ -412,6 +648,100 @@ async def delete_item(
 
     await db.media_items.delete_one({"id": item_id})
     logger.info("Media item deleted", extra={"data": {"id": item_id}})
+
+
+@router.post("/items/{item_id}/retry-processing", status_code=202)
+async def retry_processing(
+    item_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Re-queue thumbnail/preview generation for a media item whose processing failed."""
+    item = await db.media_items.find_one({"id": item_id, "status": "active"})
+    if not item:
+        raise HTTPException(status_code=404, detail="Media item not found")
+
+    content_type = item["content_type"]
+    if not (content_type.startswith("image/") or content_type.startswith("video/")):
+        raise HTTPException(status_code=400, detail="File type does not support processing")
+
+    is_image = content_type.startswith("image/")
+    reset = {"thumbnail_status": "pending", "updated_at": datetime.now(timezone.utc)}
+    if is_image:
+        reset["preview_status"] = "pending"
+
+    await db.media_items.update_one({"id": item_id}, {"$set": reset})
+
+    from services.media_processing import process_media_item_thumbnail
+    background_tasks.add_task(
+        process_media_item_thumbnail,
+        item_id=item_id,
+        r2_key=item["r2_key"],
+        content_type=content_type,
+        agency_id=current_user.agency_id,
+    )
+    logger.info("Media processing re-queued", extra={"data": {"item_id": item_id}})
+    return {"queued": True}
+
+
+@router.post("/items/{item_id}/duplicate", status_code=201)
+async def duplicate_item(
+    item_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: UserModel = Depends(require_media_access()),
+    db: ScopedDatabase = Depends(get_db),
+):
+    """Server-side copy an existing media item into the same folder."""
+    item = await db.media_items.find_one({"id": item_id, "status": "active"})
+    if not item:
+        raise HTTPException(status_code=404, detail="Media item not found")
+
+    from utils.r2 import copy_r2_object
+    ext = Path(item["name"]).suffix.lower()
+    new_id = str(uuid.uuid4())
+    new_r2_key = f"media/{current_user.agency_id}/files/{new_id}{ext}"
+    new_r2_url = f"{config.R2_PUBLIC_URL}/{new_r2_key}" if config.R2_PUBLIC_URL else new_r2_key
+
+    copy_r2_object(item["r2_key"], new_r2_key)
+
+    is_image = item["content_type"].startswith("image/")
+    is_video = item["content_type"].startswith("video/")
+
+    stem = Path(item["name"]).stem
+    new_name = f"{stem} (copy){ext}"
+
+    from models.media import MediaItem
+    new_item = MediaItem(
+        id=new_id,
+        agency_id=current_user.agency_id,
+        folder_id=item["folder_id"],
+        name=new_name,
+        r2_key=new_r2_key,
+        r2_url=new_r2_url,
+        content_type=item["content_type"],
+        size_bytes=item.get("size_bytes"),
+        source="direct",
+        status="active",
+        uploaded_by=current_user.id,
+        thumbnail_status="pending" if (is_image or is_video) else "n/a",
+        preview_status="pending" if is_image else "n/a",
+        watermark_status="n/a",
+    )
+    await db.media_items.insert_one(new_item.model_dump())
+
+    if is_image or is_video:
+        from services.media_processing import process_media_item_thumbnail
+        background_tasks.add_task(
+            process_media_item_thumbnail,
+            item_id=new_id,
+            r2_key=new_r2_key,
+            content_type=item["content_type"],
+            agency_id=current_user.agency_id,
+        )
+
+    logger.info("Media item duplicated", extra={"data": {"original_id": item_id, "new_id": new_id}})
+    return _parse_mongo(new_item.model_dump())
 
 
 @router.get("/items/{item_id}/download")

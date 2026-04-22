@@ -14,7 +14,8 @@ from config import config
 from utils.email import send_task_assignment_email
 from utils.push import send_push_notification
 from services.communication_generator import enqueue_message as enqueue_wa_message
-from models.communication import TASK_ASSIGNED
+from services.communication_generator import enqueue_message_associate as enqueue_wa_associate
+from models.communication import TASK_ASSIGNED, TASK_ASSIGNED_ASSOCIATE
 from services.deliverable_sync import (
     extract_title_base, build_deliverable_title,
     on_deliverable_task_created, on_task_status_changed,
@@ -364,6 +365,24 @@ async def create_task(
                         "agency_name": agency_name_wa,
                     },
                 )
+
+        # 7. WhatsApp — notify the assigned associate directly
+        if task.assigned_associate_id:
+            org_config_wa2 = org_config_wa if task.project_id and project else await db.agency_configs.find_one({})
+            background_tasks.add_task(
+                enqueue_wa_associate,
+                db=db,
+                agency_id=current_user.agency_id,
+                alert_type=TASK_ASSIGNED_ASSOCIATE,
+                recipient_associate_id=task.assigned_associate_id,
+                source={"kind": "task", "id": task.id},
+                render_ctx={
+                    "task_title": task.title,
+                    "project_code": project.get("code", "") if project else "",
+                    "due_date": task.due_date,
+                    "agency_name": (org_config_wa2 or {}).get("org_name", ""),
+                },
+            )
 
         logger.info(f"Task assignment notification sent", extra={"data": {"task_id": task.id, "assignee": task.assigned_to}})
 
@@ -754,6 +773,8 @@ async def update_task(
 
             # 6. WhatsApp — notify project client on reassignment
             reassign_project_id = existing_task.get("project_id")
+            reassign_project = None
+            org_cfg_wa = None
             if reassign_project_id:
                 try:
                     reassign_project = await db.projects.find_one({"_id": ObjectId(reassign_project_id)})
@@ -777,6 +798,26 @@ async def update_task(
                                 "agency_name": (org_cfg_wa or {}).get("org_name", ""),
                             },
                         )
+
+            # 7. WhatsApp — notify associate on reassignment
+            new_associate_id = update_data.get("assigned_associate_id") or existing_task.get("assigned_associate_id")
+            if new_associate_id and "assigned_associate_id" in filtered_update:
+                if org_cfg_wa is None:
+                    org_cfg_wa = await db.agency_configs.find_one({})
+                background_tasks.add_task(
+                    enqueue_wa_associate,
+                    db=db,
+                    agency_id=current_user.agency_id,
+                    alert_type=TASK_ASSIGNED_ASSOCIATE,
+                    recipient_associate_id=new_associate_id,
+                    source={"kind": "task", "id": task_id},
+                    render_ctx={
+                        "task_title": current_title,
+                        "project_code": reassign_project.get("code", "") if reassign_project else "",
+                        "due_date": due_date,
+                        "agency_name": (org_cfg_wa or {}).get("org_name", ""),
+                    },
+                )
 
             logger.info(f"Task reassignment notification sent", extra={"data": {"task_id": task_id, "new_assignee": new_assignee}})
     

@@ -19,6 +19,7 @@ class CommunicationSettings(BaseModel):
     globally_enabled_types: List[str] = Field(default_factory=lambda: list(ALL_ALERT_TYPES))
     client_overrides: Dict[str, ClientAlertOverride] = Field(default_factory=dict)
     operator_overrides: Dict[str, OperatorAlertOverride] = Field(default_factory=dict)
+    team_notifications_enabled: bool = True
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = ConfigDict(
