@@ -291,9 +291,9 @@ async def test_list_folder_tree_structure(async_client: AsyncClient, auth_header
 
     resp = await async_client.get("/api/media/folders", headers=auth_headers)
     assert resp.status_code == 200
-    tree = resp.json()
-    root = next(f for f in tree if f["id"] == parent["id"])
-    assert len(root["children"]) == 2
+    folders = resp.json()
+    children = [f for f in folders if f.get("parent_id") == parent["id"]]
+    assert len(children) == 2
 
 
 async def test_rename_folder(async_client: AsyncClient, auth_headers):
@@ -319,10 +319,11 @@ async def test_rename_folder_updates_descendant_paths(async_client: AsyncClient,
     )
 
     tree_resp = await async_client.get("/api/media/folders", headers=auth_headers)
-    tree = tree_resp.json()
-    renamed = next(f for f in tree if f["id"] == parent["id"])
+    folders = tree_resp.json()
+    renamed = next(f for f in folders if f["id"] == parent["id"])
     assert renamed["path"] == "/Renamed/"
-    assert renamed["children"][0]["path"] == "/Renamed/Child/"
+    child_updated = next(f for f in folders if f["id"] == child["id"])
+    assert child_updated["path"] == "/Renamed/Child/"
 
 
 async def test_rename_folder_not_found(async_client: AsyncClient, auth_headers):
