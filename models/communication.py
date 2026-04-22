@@ -6,6 +6,8 @@ import uuid
 # Alert type string constants — use strings (not Literal) to allow new types without migrations
 TASK_ASSIGNED = "task_assigned"
 TASK_DEADLINE = "task_deadline"
+TASK_ASSIGNED_ASSOCIATE = "task_assigned_associate"
+TASK_DEADLINE_ASSOCIATE = "task_deadline_associate"
 PROJECT_CONFIRMATION = "project_confirmation"
 PROJECT_STAGE_CHANGED = "project_stage_changed"
 INVOICE_SENT = "invoice_sent"
@@ -18,6 +20,8 @@ CUSTOM = "custom"
 ALL_ALERT_TYPES = [
     TASK_ASSIGNED,
     TASK_DEADLINE,
+    TASK_ASSIGNED_ASSOCIATE,
+    TASK_DEADLINE_ASSOCIATE,
     PROJECT_CONFIRMATION,
     PROJECT_STAGE_CHANGED,
     INVOICE_SENT,
@@ -31,6 +35,8 @@ ALL_ALERT_TYPES = [
 ALERT_TYPE_LABELS = {
     TASK_ASSIGNED: "Task Assigned",
     TASK_DEADLINE: "Task Deadline",
+    TASK_ASSIGNED_ASSOCIATE: "Task Assigned (Team)",
+    TASK_DEADLINE_ASSOCIATE: "Task Deadline (Team)",
     PROJECT_CONFIRMATION: "Project Confirmation",
     PROJECT_STAGE_CHANGED: "Project Stage Changed",
     INVOICE_SENT: "Invoice Sent",
