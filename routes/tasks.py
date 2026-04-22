@@ -262,6 +262,7 @@ async def create_task(
         if project_doc:
             event = next((e for e in project_doc.get("events", []) if e.get("id") == task.event_id), None)
             if event and event.get("type"):
+                task.deliverable_type = task.title  # preserve type before name substitution overwrites it
                 display = task.name or task.title
                 task.title = build_deliverable_title(display, event["type"])
 
@@ -279,8 +280,12 @@ async def create_task(
     if task.assigned_to and task.assigned_to != current_user.id:
         # 1. Get Project Details if exists
         project_title = None
+        project = None
         if task.project_id:
-            project = await db.projects.find_one({"id": task.project_id})
+            try:
+                project = await db.projects.find_one({"_id": ObjectId(task.project_id)})
+            except Exception:
+                project = await db.projects.find_one({"id": task.project_id})
             if project:
                 project_title = project.get("code", "")
 
@@ -622,10 +627,14 @@ async def update_task(
             )
             if event and event.get("type"):
                 new_name = update_data.get("name") if "name" in update_data else existing_task.get("name")
-                new_type_base = (update_data.get("title") if "title" in update_data
-                                 else extract_title_base(existing_task.get("title", "")))
+                # "title" from the frontend is the deliverable type; fall back to stored deliverable_type
+                if "title" in update_data:
+                    new_type_base = update_data["title"]
+                else:
+                    new_type_base = existing_task.get("deliverable_type") or extract_title_base(existing_task.get("title", ""))
                 display = new_name if new_name else new_type_base
                 update_data["title"] = build_deliverable_title(display, event["type"])
+                update_data["deliverable_type"] = new_type_base  # keep type field in sync
                 if "title" not in changes or changes["title"][1] != update_data["title"]:
                     changes["title"] = (existing_task.get("title"), update_data["title"])
 
@@ -673,8 +682,12 @@ async def update_task(
             # 1. Get Project Details
             project_id = existing_task.get("project_id")
             project_title = None
+            project = None
             if project_id:
-                project = await db.projects.find_one({"id": project_id})
+                try:
+                    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+                except Exception:
+                    project = await db.projects.find_one({"id": project_id})
                 if project:
                     project_title = project.get("code", "")
 
@@ -742,7 +755,10 @@ async def update_task(
             # 6. WhatsApp — notify project client on reassignment
             reassign_project_id = existing_task.get("project_id")
             if reassign_project_id:
-                reassign_project = await db.projects.find_one({"id": reassign_project_id})
+                try:
+                    reassign_project = await db.projects.find_one({"_id": ObjectId(reassign_project_id)})
+                except Exception:
+                    reassign_project = await db.projects.find_one({"id": reassign_project_id})
                 if reassign_project:
                     reassign_client_id = reassign_project.get("client_id")
                     if reassign_client_id:

@@ -2371,11 +2371,38 @@ async def replace_file(
             {"$set": {"portal_deliverables.$.download_count": 0}}
         )
 
+    # Sync the linked MediaItem with new file data
+    media_item_id = file_entry.get("media_item_id")
+    if media_item_id:
+        try:
+            media_updates = {
+                "name": body["file_name"],
+                "r2_key": body["r2_key"],
+                "r2_url": body["r2_url"],
+                "content_type": content_type,
+                "size_bytes": body.get("size_bytes", 0),
+                "thumbnail_r2_key": None,
+                "thumbnail_r2_url": None,
+                "thumbnail_status": "pending" if (is_image or is_video) else "n/a",
+                "preview_r2_key": None,
+                "preview_r2_url": None,
+                "preview_status": "pending" if is_image else "n/a",
+                "watermark_r2_key": None,
+                "watermark_r2_url": None,
+                "watermark_status": "pending" if is_video else "n/a",
+                "updated_at": now,
+            }
+            await db.media_items.update_one({"id": media_item_id}, {"$set": media_updates})
+        except Exception:
+            logger.error("Failed to sync MediaItem after file replace", exc_info=True)
+
     # Queue thumbnail/watermark processing
     agency_id = project.get("agency_id", "default")
     if is_image or is_video:
-        from services.media_processing import process_thumbnail, process_watermark
+        from services.media_processing import process_thumbnail, process_watermark, process_media_item_thumbnail
         background_tasks.add_task(process_thumbnail, project_id, deliverable_id, file_id, body["r2_key"], content_type, agency_id)
+        if media_item_id:
+            background_tasks.add_task(process_media_item_thumbnail, media_item_id, body["r2_key"], content_type, agency_id)
         if is_video and project.get("portal_watermark_enabled"):
             watermark_text = project.get("portal_watermark_text") or "Protected"
             background_tasks.add_task(process_watermark, project_id, deliverable_id, file_id, body["r2_key"], watermark_text, agency_id)

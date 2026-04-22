@@ -22,6 +22,7 @@ class TaskModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
     name: Optional[str] = None  # Optional display name for deliverable tasks (overrides type in portal)
+    deliverable_type: Optional[str] = None  # Canonical deliverable type (e.g. "Photo") stored separately from title
     description: Optional[str] = None
     quantity: Optional[int] = 1 # Added for deliverables (e.g., number of photos)
     
