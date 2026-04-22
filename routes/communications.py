@@ -122,8 +122,11 @@ async def create_message(
     if not recipient_id:
         raise HTTPException(status_code=400, detail="recipient_id is required")
     if not recipient_phone:
-        # Try to resolve from DB
-        client_doc = await db.clients.find_one({"id": recipient_id})
+        # Try to resolve from DB — recipient_id is MongoDB _id string from the frontend
+        if ObjectId.is_valid(recipient_id):
+            client_doc = await db.clients.find_one({"_id": ObjectId(recipient_id)})
+        else:
+            client_doc = await db.clients.find_one({"id": recipient_id})
         if client_doc:
             from utils.phone import resolve_whatsapp_number
             recipient_phone = resolve_whatsapp_number(client_doc) or ""

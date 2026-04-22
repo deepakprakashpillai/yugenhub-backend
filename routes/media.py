@@ -109,10 +109,9 @@ async def list_folder_tree(
     current_user: UserModel = Depends(require_media_access()),
     db: ScopedDatabase = Depends(get_db),
 ):
-    """Return the full virtual folder tree for the agency."""
+    """Return the full flat folder list for the agency. Tree building is done client-side."""
     folders = await db.media_folders.find({}).to_list(length=None)
-    folders = _parse_mongo(folders)
-    return await _build_folder_tree(folders)
+    return _parse_mongo(folders)
 
 
 @router.post("/folders", status_code=201)
