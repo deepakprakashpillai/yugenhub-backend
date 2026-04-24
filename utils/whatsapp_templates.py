@@ -19,44 +19,7 @@ def _fmt_date(dt) -> str:
     return dt.strftime("%d %b %Y")
 
 
-def task_assigned(
-    client_name: str,
-    task_title: str,
-    project_code: str,
-    due_date=None,
-    agency_name: str = "",
-) -> str:
-    lines = [
-        f"Hi {client_name},",
-        "",
-        f"A new task has been assigned for your project *{project_code}*:",
-        f"📋 *{task_title}*",
-    ]
-    if due_date:
-        lines.append(f"📅 Due: {_fmt_date(due_date)}")
-    if agency_name:
-        lines.extend(["", f"— {agency_name}"])
-    return "\n".join(lines)
-
-
-def task_deadline(
-    client_name: str,
-    task_title: str,
-    project_code: str,
-    due_date,
-    agency_name: str = "",
-) -> str:
-    lines = [
-        f"Hi {client_name},",
-        "",
-        f"A reminder that the following task for *{project_code}* is due soon:",
-        f"📋 *{task_title}*",
-        f"📅 Due: {_fmt_date(due_date)}",
-    ]
-    if agency_name:
-        lines.extend(["", f"— {agency_name}"])
-    return "\n".join(lines)
-
+# ─── Client templates ─────────────────────────────────────────────────────────
 
 def project_confirmation(
     client_name: str,
@@ -87,82 +50,19 @@ def project_confirmation(
     return "\n".join(lines)
 
 
-def project_stage_changed(
+def deliverable_uploaded(
     client_name: str,
     project_code: str,
-    new_status: str,
+    deliverable_name: str,
     agency_name: str = "",
 ) -> str:
     lines = [
         f"Hi {client_name},",
         "",
-        f"Your project *{project_code}* has moved to a new stage: *{new_status}*.",
+        f"We've uploaded new files for *{project_code}*:",
+        f"📁 *{deliverable_name}*",
         "",
-        "We'll be in touch with updates soon.",
-    ]
-    if agency_name:
-        lines.extend(["", f"— {agency_name}"])
-    return "\n".join(lines)
-
-
-def invoice_sent(
-    client_name: str,
-    invoice_no: str,
-    amount: float,
-    currency: str = "INR",
-    due_date=None,
-    agency_name: str = "",
-) -> str:
-    lines = [
-        f"Hi {client_name},",
-        "",
-        f"Your invoice *{invoice_no}* for *{currency} {amount:,.2f}* has been issued.",
-    ]
-    if due_date:
-        lines.append(f"📅 Due by: {_fmt_date(due_date)}")
-    lines.extend([
-        "",
-        "Please let us know if you have any questions.",
-    ])
-    if agency_name:
-        lines.extend(["", f"— {agency_name}"])
-    return "\n".join(lines)
-
-
-def invoice_due_soon(
-    client_name: str,
-    invoice_no: str,
-    amount: float,
-    due_date,
-    currency: str = "INR",
-    agency_name: str = "",
-) -> str:
-    lines = [
-        f"Hi {client_name},",
-        "",
-        f"A gentle reminder that invoice *{invoice_no}* (*{currency} {amount:,.2f}*) is due on *{_fmt_date(due_date)}*.",
-        "",
-        "Please reach out if you need any assistance.",
-    ]
-    if agency_name:
-        lines.extend(["", f"— {agency_name}"])
-    return "\n".join(lines)
-
-
-def invoice_overdue(
-    client_name: str,
-    invoice_no: str,
-    amount: float,
-    due_date,
-    currency: str = "INR",
-    agency_name: str = "",
-) -> str:
-    lines = [
-        f"Hi {client_name},",
-        "",
-        f"Invoice *{invoice_no}* (*{currency} {amount:,.2f}*) was due on *{_fmt_date(due_date)}* and appears to be outstanding.",
-        "",
-        "Kindly arrange payment at your earliest convenience. Thank you!",
+        "Check them out on your client portal.",
     ]
     if agency_name:
         lines.extend(["", f"— {agency_name}"])
@@ -188,18 +88,42 @@ def approval_requested(
     return "\n".join(lines)
 
 
-def task_assigned_associate(
+# ─── Associate templates ──────────────────────────────────────────────────────
+
+def event_assigned(
     associate_name: str,
-    task_title: str,
     project_code: str,
+    event_type: str,
+    event_date=None,
+    venue_name: str = "",
+    agency_name: str = "",
+) -> str:
+    lines = [
+        f"Hi {associate_name},",
+        "",
+        f"You've been assigned to *{event_type}* for project *{project_code}*.",
+    ]
+    if event_date:
+        lines.append(f"📅 Date: {_fmt_date(event_date)}")
+    if venue_name:
+        lines.append(f"📍 Venue: {venue_name}")
+    if agency_name:
+        lines.extend(["", f"— {agency_name}"])
+    return "\n".join(lines)
+
+
+def deliverable_assigned(
+    associate_name: str,
+    project_code: str,
+    deliverable_type: str,
     due_date=None,
     agency_name: str = "",
 ) -> str:
     lines = [
         f"Hi {associate_name},",
         "",
-        f"You've been assigned a task on project *{project_code}*:",
-        f"📋 *{task_title}*",
+        f"You've been assigned a deliverable on project *{project_code}*:",
+        f"📦 *{deliverable_type}*",
     ]
     if due_date:
         lines.append(f"📅 Due: {_fmt_date(due_date)}")
@@ -208,15 +132,39 @@ def task_assigned_associate(
     return "\n".join(lines)
 
 
-def task_deadline_associate(
+def event_reminder(
     associate_name: str,
-    task_title: str,
     project_code: str,
+    event_type: str,
+    event_date=None,
+    venue_name: str = "",
+    agency_name: str = "",
+) -> str:
+    lines = [
+        f"Hi {associate_name},",
+        "",
+        f"Reminder: *{event_type}* for project *{project_code}* is coming up soon.",
+    ]
+    if event_date:
+        lines.append(f"📅 Date: {_fmt_date(event_date)}")
+    if venue_name:
+        lines.append(f"📍 Venue: {venue_name}")
+    if agency_name:
+        lines.extend(["", f"— {agency_name}"])
+    return "\n".join(lines)
+
+
+def deliverable_reminder(
+    associate_name: str,
+    project_code: str,
+    deliverable_type: str,
     due_date=None,
     agency_name: str = "",
 ) -> str:
     lines = [
-        f"Reminder: *{task_title}* ({project_code}) is due soon.",
+        f"Hi {associate_name},",
+        "",
+        f"Reminder: *{deliverable_type}* for project *{project_code}* is due soon.",
     ]
     if due_date:
         lines.append(f"📅 Due: {_fmt_date(due_date)}")
@@ -225,20 +173,24 @@ def task_deadline_associate(
     return "\n".join(lines)
 
 
-def deliverable_uploaded(
-    client_name: str,
+def deliverable_overdue(
+    associate_name: str,
     project_code: str,
-    deliverable_name: str,
+    deliverable_type: str,
+    due_date=None,
     agency_name: str = "",
 ) -> str:
     lines = [
-        f"Hi {client_name},",
+        f"Hi {associate_name},",
         "",
-        f"We've uploaded new files for *{project_code}*:",
-        f"📁 *{deliverable_name}*",
-        "",
-        "Check them out on your client portal.",
+        f"*{deliverable_type}* for project *{project_code}* is overdue.",
     ]
+    if due_date:
+        lines.append(f"📅 Was due: {_fmt_date(due_date)}")
+    lines.extend([
+        "",
+        "Please update your progress or reach out if you need help.",
+    ])
     if agency_name:
         lines.extend(["", f"— {agency_name}"])
     return "\n".join(lines)

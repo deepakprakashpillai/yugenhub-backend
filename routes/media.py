@@ -41,6 +41,19 @@ def _build_path(parent_path: str, name: str) -> str:
     return f"{parent_path.rstrip('/')}/{name}/"
 
 
+async def _enrich_uploader_names(items: List[dict], db) -> None:
+    """Attach uploaded_by_name to each item by looking up user display names."""
+    user_ids = {item["uploaded_by"] for item in items if item.get("uploaded_by")}
+    if not user_ids:
+        return
+    users = await db.users.find({"id": {"$in": list(user_ids)}}).to_list(length=None)
+    name_map = {u["id"]: u.get("name", "") for u in users}
+    for item in items:
+        uid = item.get("uploaded_by")
+        if uid and uid in name_map:
+            item["uploaded_by_name"] = name_map[uid]
+
+
 async def _build_folder_tree(folders: List[dict]) -> List[dict]:
     """Convert flat folder list into a nested tree."""
     folder_map = {f["id"]: {**f, "children": []} for f in folders}
@@ -444,6 +457,8 @@ async def list_folder_items(
         if item.get("preview_r2_key"):
             item["preview_url"] = generate_presigned_get_url(item["preview_r2_key"], expires_in=3600)
 
+    await _enrich_uploader_names(items, db)
+
     return {
         "total": total,
         "page": page,
@@ -776,6 +791,7 @@ async def search_items(
         if item.get("thumbnail_r2_key"):
             item["thumbnail_r2_url"] = generate_presigned_get_url(item["thumbnail_r2_key"], expires_in=3600)
 
+    await _enrich_uploader_names(items, db)
     return {"data": items, "count": len(items)}
 
 

@@ -415,8 +415,8 @@ async def update_scheduler_config(
     db: ScopedDatabase = Depends(get_db),
 ):
     allowed = {
-        "task_deadline_enabled", "task_deadline_hours_before",
-        "invoice_scan_enabled", "invoice_due_soon_days_before",
+        "event_scan_enabled", "event_reminder_hours_before",
+        "deliverable_scan_enabled", "deliverable_reminder_days_before",
     }
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
@@ -441,31 +441,27 @@ async def scheduler_run_now(
 ):
     """Trigger an immediate scan for the current agency."""
     from services.communication_scheduler import (
-        run_task_deadline_for_agency,
-        run_task_deadline_associate_for_agency,
-        run_invoice_scan_for_agency,
+        run_event_reminder_for_agency,
+        run_deliverable_scan_for_agency,
     )
 
     cfg_doc = await db.scheduler_configs.find_one({})
-    _known = {"task_deadline_enabled", "task_deadline_hours_before", "invoice_scan_enabled", "invoice_due_soon_days_before"}
+    _known = {"event_scan_enabled", "event_reminder_hours_before", "deliverable_scan_enabled", "deliverable_reminder_days_before"}
     cfg_data = {"agency_id": current_user.agency_id, **{k: v for k, v in (cfg_doc or {}).items() if k in _known}}
     cfg = SchedulerConfig(**cfg_data)
 
-    if job_name == "task_deadline":
-        count = await run_task_deadline_for_agency(db, current_user.agency_id, cfg.task_deadline_hours_before)
+    if job_name == "event_reminder":
+        count = await run_event_reminder_for_agency(db, current_user.agency_id, cfg.event_reminder_hours_before)
         return {"job": job_name, "queued": count}
-    if job_name == "task_deadline_associate":
-        count = await run_task_deadline_associate_for_agency(db, current_user.agency_id, cfg.task_deadline_hours_before)
-        return {"job": job_name, "queued": count}
-    if job_name == "invoice":
-        count = await run_invoice_scan_for_agency(db, current_user.agency_id, cfg.invoice_due_soon_days_before)
+    if job_name == "deliverable":
+        count = await run_deliverable_scan_for_agency(db, current_user.agency_id, cfg.deliverable_reminder_days_before)
         return {"job": job_name, "queued": count}
     raise HTTPException(status_code=400, detail="Unknown job name")
 
 
 # ─── Blast ────────────────────────────────────────────────────────────────────
 
-_BLAST_TYPES = {"task_deadline", "invoice_due_soon", "invoice_overdue", "approval_requested"}
+_BLAST_TYPES = {"approval_requested"}
 
 
 async def _build_blast_candidates(
@@ -489,94 +485,7 @@ async def _build_blast_candidates(
             return _render_custom_template(custom_tpl["body_template"], ctx)
         return _render_body(alert_type, ctx) or ""
 
-    if alert_type == "task_deadline":
-        window_end = now + timedelta(hours=24)
-        cursor = raw_db.tasks.find({
-            "$or": [{"studio_id": agency_id}, {"agency_id": agency_id}],
-            "due_date": {"$gte": now, "$lte": window_end},
-            "status": {"$nin": ["done", "completed"]},
-        })
-        async for task in cursor:
-            project_id = task.get("project_id")
-            client_id = None
-            project_code = ""
-            if project_id:
-                try:
-                    project = await raw_db.projects.find_one({"_id": ObjId(project_id)})
-                except Exception:
-                    project = await raw_db.projects.find_one({"id": project_id})
-                if project:
-                    client_id = project.get("client_id")
-                    project_code = project.get("code", "")
-            if not client_id:
-                continue
-            if ObjId.is_valid(client_id):
-                client = await raw_db.clients.find_one({"_id": ObjId(client_id)})
-            else:
-                client = await raw_db.clients.find_one({"id": client_id})
-            if not client:
-                continue
-            ctx = {
-                "client_name": client.get("name", "there"),
-                "task_title": task.get("title", ""),
-                "project_code": project_code,
-                "due_date": task.get("due_date"),
-                "agency_name": "",
-            }
-            candidates.append({
-                "recipient_id": str(client.get("_id", client.get("id", ""))),
-                "recipient_name": client.get("name", ""),
-                "recipient_phone": client.get("whatsapp_number") or client.get("phone", ""),
-                "message_preview": _render(ctx),
-                "source": {"kind": "task", "id": str(task.get("id", task.get("_id", "")))},
-                "render_ctx": {k: str(v) if hasattr(v, "isoformat") else v for k, v in ctx.items()},
-            })
-
-    elif alert_type in ("invoice_due_soon", "invoice_overdue"):
-        cursor = raw_db.finance_invoices.find({"agency_id": agency_id, "status": {"$nin": ["paid", "cancelled"]}})
-        async for invoice in cursor:
-            due_date = invoice.get("due_date")
-            if not due_date:
-                continue
-            if isinstance(due_date, str):
-                try:
-                    due_date = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-            is_due_soon = now <= due_date <= now + timedelta(days=3)
-            is_overdue = due_date < now
-            if alert_type == "invoice_due_soon" and not is_due_soon:
-                continue
-            if alert_type == "invoice_overdue" and not is_overdue:
-                continue
-
-            client_id = invoice.get("client_id")
-            if not client_id:
-                continue
-            if ObjId.is_valid(client_id):
-                client = await raw_db.clients.find_one({"_id": ObjId(client_id)})
-            else:
-                client = await raw_db.clients.find_one({"id": client_id})
-            if not client:
-                continue
-            ctx = {
-                "client_name": client.get("name", "there"),
-                "invoice_no": invoice.get("invoice_no", ""),
-                "amount": invoice.get("total_amount", 0),
-                "currency": invoice.get("currency", "INR"),
-                "due_date": due_date,
-                "agency_name": "",
-            }
-            candidates.append({
-                "recipient_id": str(client.get("_id", client.get("id", ""))),
-                "recipient_name": client.get("name", ""),
-                "recipient_phone": client.get("whatsapp_number") or client.get("phone", ""),
-                "message_preview": _render(ctx),
-                "source": {"kind": "invoice", "id": str(invoice.get("id", invoice.get("_id", "")))},
-                "render_ctx": {k: str(v) if hasattr(v, "isoformat") else v for k, v in ctx.items()},
-            })
-
-    elif alert_type == "approval_requested":
+    if alert_type == "approval_requested":
         cursor = raw_db.projects.find({"agency_id": agency_id})
         async for project in cursor:
             client_id = project.get("client_id")

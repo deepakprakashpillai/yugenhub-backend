@@ -1,16 +1,4 @@
-"""Enqueue a WhatsApp message after checking notification settings and dedup.
-
-Usage:
-    background_tasks.add_task(
-        enqueue_message,
-        db=db,
-        agency_id=agency_id,
-        alert_type=TASK_ASSIGNED,
-        recipient_client_id="<cid>",
-        source={"kind": "task", "id": task_id},
-        render_ctx={...},   # passed to the appropriate template function
-    )
-"""
+"""Enqueue a WhatsApp message after checking notification settings and dedup."""
 
 import re
 from datetime import datetime, timezone, timedelta
@@ -19,7 +7,7 @@ from bson import ObjectId
 from logging_config import get_logger
 from middleware.db_guard import ScopedDatabase
 from models.communication import CommunicationMessage, ALL_ALERT_TYPES
-from models.communication import TASK_ASSIGNED_ASSOCIATE, TASK_DEADLINE_ASSOCIATE
+from models.communication import EVENT_ASSIGNED, DELIVERABLE_ASSIGNED, EVENT_REMINDER, DELIVERABLE_REMINDER, DELIVERABLE_OVERDUE
 from models.communication_settings import CommunicationSettings
 from utils.phone import resolve_whatsapp_number
 import utils.whatsapp_templates as templates
@@ -30,34 +18,35 @@ logger = get_logger("communication_generator")
 async def _get_settings(db: ScopedDatabase, agency_id: str) -> CommunicationSettings:
     doc = await db.communication_settings.find_one({"agency_id": agency_id})
     if doc:
-        return CommunicationSettings(**doc)
+        settings = CommunicationSettings(**doc)
+        # Auto-add any new alert types introduced after this settings doc was created
+        stored = set(settings.globally_enabled_types)
+        from models.communication import ALL_ALERT_TYPES as _ALL
+        missing = [t for t in _ALL if t not in stored]
+        if missing:
+            settings.globally_enabled_types = settings.globally_enabled_types + missing
+        return settings
     return CommunicationSettings(agency_id=agency_id)
 
 
 def _render_body(alert_type: str, ctx: dict) -> str | None:
     try:
-        if alert_type == "task_assigned":
-            return templates.task_assigned(**ctx)
-        if alert_type == "task_deadline":
-            return templates.task_deadline(**ctx)
         if alert_type == "project_confirmation":
             return templates.project_confirmation(**ctx)
-        if alert_type == "project_stage_changed":
-            return templates.project_stage_changed(**ctx)
-        if alert_type == "invoice_sent":
-            return templates.invoice_sent(**ctx)
-        if alert_type == "invoice_due_soon":
-            return templates.invoice_due_soon(**ctx)
-        if alert_type == "invoice_overdue":
-            return templates.invoice_overdue(**ctx)
-        if alert_type == "approval_requested":
-            return templates.approval_requested(**ctx)
         if alert_type == "deliverable_uploaded":
             return templates.deliverable_uploaded(**ctx)
-        if alert_type == "task_assigned_associate":
-            return templates.task_assigned_associate(**ctx)
-        if alert_type == "task_deadline_associate":
-            return templates.task_deadline_associate(**ctx)
+        if alert_type == "approval_requested":
+            return templates.approval_requested(**ctx)
+        if alert_type == "event_assigned":
+            return templates.event_assigned(**ctx)
+        if alert_type == "deliverable_assigned":
+            return templates.deliverable_assigned(**ctx)
+        if alert_type == "event_reminder":
+            return templates.event_reminder(**ctx)
+        if alert_type == "deliverable_reminder":
+            return templates.deliverable_reminder(**ctx)
+        if alert_type == "deliverable_overdue":
+            return templates.deliverable_overdue(**ctx)
         if alert_type == "custom":
             return ctx.get("message_body", "")
         logger.warning(f"Unknown alert_type for rendering: {alert_type}")
