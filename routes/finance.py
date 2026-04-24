@@ -10,8 +10,6 @@ from models.user import UserModel
 from middleware.db_guard import ScopedDatabase
 from constants import Roles
 from logging_config import get_logger
-from services.communication_generator import enqueue_message as enqueue_wa_message
-from models.communication import INVOICE_SENT
 
 logger = get_logger("finance")
 
@@ -265,30 +263,6 @@ async def update_invoice_status(
         {"id": invoice_id},
         {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
     )
-
-    # WhatsApp — notify client when invoice moves to "sent"
-    if status == "sent" and old_status != "sent":
-        client_id = invoice.get("client_id")
-        if client_id:
-            try:
-                org_config_wa = await db.agency_configs.find_one({})
-                agency_name_wa = (org_config_wa or {}).get("org_name", "")
-                await enqueue_wa_message(
-                    db=db,
-                    agency_id=current_user.agency_id,
-                    alert_type=INVOICE_SENT,
-                    recipient_client_id=client_id,
-                    source={"kind": "invoice", "id": invoice_id},
-                    render_ctx={
-                        "invoice_no": invoice.get("invoice_no", ""),
-                        "amount": invoice.get("total_amount", 0),
-                        "currency": invoice.get("currency", "INR"),
-                        "due_date": invoice.get("due_date"),
-                        "agency_name": agency_name_wa,
-                    },
-                )
-            except Exception as exc:
-                logger.error(f"Failed to queue invoice_sent WA message: {exc}")
 
     return {"status": "success"}
 

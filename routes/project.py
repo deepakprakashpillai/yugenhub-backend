@@ -16,7 +16,8 @@ from config import config
 from utils.email import send_event_assignment_email
 from utils.push import send_push_notification
 from services.communication_generator import enqueue_message as enqueue_wa_message
-from models.communication import PROJECT_CONFIRMATION, PROJECT_STAGE_CHANGED
+from services.communication_generator import enqueue_message_associate as enqueue_wa_associate
+from models.communication import PROJECT_CONFIRMATION, EVENT_ASSIGNED
 from utils.r2 import generate_presigned_put_url, delete_r2_object
 from automations.calendar import sync_event_to_calendar, sync_attendee_to_calendar
 from services.deliverable_sync import (
@@ -139,6 +140,31 @@ async def notify_associate_assignment(db: ScopedDatabase, background_tasks: Back
         message=f"You have been assigned to {event_type} on {formatted_date} for project {project_code}",
         url=f"/projects"
     )
+
+    # WhatsApp — notify associate about event assignment
+    try:
+        from middleware.db_guard import ScopedDatabase
+        from database import db as raw_db
+        scoped_db = ScopedDatabase(raw_db, agency_id)
+        org_config_wa = await db.agency_configs.find_one({})
+        agency_name_wa = (org_config_wa or {}).get("org_name", "")
+        background_tasks.add_task(
+            enqueue_wa_associate,
+            db=scoped_db,
+            agency_id=agency_id,
+            alert_type=EVENT_ASSIGNED,
+            recipient_associate_id=associate_id,
+            source={"kind": "event", "id": ""},
+            render_ctx={
+                "project_code": project_code,
+                "event_type": event_type,
+                "event_date": event_date,
+                "venue_name": "",
+                "agency_name": agency_name_wa,
+            },
+        )
+    except Exception as exc:
+        logger.error(f"Failed to queue event_assigned WA message: {exc}")
 
     logger.info(f"Notification sent to associate for event assignment", extra={"data": {"associate": associate.get('name'), "project": project_code, "event": event_type}})
 
@@ -1015,30 +1041,6 @@ async def update_project(
                         end_time=evt.get("end_date"),
                         calendar_event_id=evt.get("calendar_event_id")
                     )
-
-    # WhatsApp — notify client when project status changes
-    new_status = update_data.get("status")
-    if new_status and new_status != old_status and updated_project:
-        client_id = updated_project.get("client_id")
-        if client_id:
-            try:
-                org_config_wa = await db.agency_configs.find_one({})
-                agency_name_wa = (org_config_wa or {}).get("org_name", "")
-                background_tasks.add_task(
-                    enqueue_wa_message,
-                    db=db,
-                    agency_id=current_user.agency_id,
-                    alert_type=PROJECT_STAGE_CHANGED,
-                    recipient_client_id=client_id,
-                    source={"kind": "project", "id": project_id},
-                    render_ctx={
-                        "project_code": updated_project.get("code", ""),
-                        "new_status": new_status,
-                        "agency_name": agency_name_wa,
-                    },
-                )
-            except Exception as e:
-                logger.error(f"Failed to queue project_stage_changed WA message: {e}")
 
     logger.info(f"Project updated", extra={"data": {"project_id": project_id, "fields": list(update_data.keys())}})
     return {"message": "Project updated successfully"}
