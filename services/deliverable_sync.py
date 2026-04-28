@@ -366,7 +366,7 @@ async def on_portal_file_added(db, project_id: str, portal_deliverable_id: str) 
         return
 
     pd = project["portal_deliverables"][0]
-    if pd.get("status") == "Pending":
+    if pd.get("status") in ("Pending", "Changes Requested"):
         await db.projects.update_one(
             {"_id": ObjectId(project_id), "portal_deliverables.id": portal_deliverable_id},
             {"$set": {

@@ -55,5 +55,44 @@ async def check_agent_rate_limit(request: Request):
     else:
         client_ip = request.client.host if request.client else "unknown"
         key = f"agent_limit_{client_ip}"
-        
+
     await agent_rate_limiter.check_rate_limit(key)
+
+
+# ── Editor portal rate limiters ───────────────────────────────────────────────
+
+# identify: per-IP, tight — protects against credential stuffing before token auth
+editor_identify_limiter = SimpleRateLimiter(requests_per_minute=10)
+
+# part-url: per-token, high — a 5 GB file needs ~50 presigned URLs, allow headroom for retries
+editor_parts_limiter = SimpleRateLimiter(requests_per_minute=200)
+
+# write ops (comment, upload init/complete/abort, version init/complete): per-token, moderate
+editor_write_limiter = SimpleRateLimiter(requests_per_minute=30)
+
+# read ops (get portal data, version download): per-token, relaxed
+editor_read_limiter = SimpleRateLimiter(requests_per_minute=60)
+
+
+async def check_editor_identify_limit(request: Request):
+    """Per-IP limit for the identify endpoint."""
+    ip = request.client.host if request.client else "unknown"
+    await editor_identify_limiter.check_rate_limit(f"editor_identify_{ip}")
+
+
+async def check_editor_parts_limit(request: Request):
+    """Per-token high-volume limit for presigned part-URL requests."""
+    token = request.path_params.get("token", "unknown")
+    await editor_parts_limiter.check_rate_limit(f"editor_parts_{token}")
+
+
+async def check_editor_write_limit(request: Request):
+    """Per-token moderate limit for write operations (upload, comment)."""
+    token = request.path_params.get("token", "unknown")
+    await editor_write_limiter.check_rate_limit(f"editor_write_{token}")
+
+
+async def check_editor_read_limit(request: Request):
+    """Per-token relaxed limit for read operations."""
+    token = request.path_params.get("token", "unknown")
+    await editor_read_limiter.check_rate_limit(f"editor_read_{token}")

@@ -4,7 +4,7 @@ import secrets
 from bson import ObjectId
 from datetime import datetime, timezone
 # REMOVED raw collection imports
-from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel, PortalDeliverableModel, FeedbackEntry, DeliverableFile
+from models.project import ProjectModel, EventModel, DeliverableModel, AssignmentModel, PortalDeliverableModel, FeedbackEntry, DeliverableFile, EditorTokenModel
 from models.notification import NotificationModel
 from models.task import TaskModel # IMPORTED
 from routes.deps import get_current_user, get_db, get_user_verticals, require_role
@@ -1502,6 +1502,86 @@ async def generate_portal_token(
     return {"portal_token": token}
 
 
+@router.post("/{project_id}/editor-tokens")
+async def create_editor_token(
+    project_id: str,
+    body: dict = Body(...),
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    label = body.get("label", "")
+    deliverable_ids = body.get("deliverable_ids", [])
+
+    # Validate all deliverable_ids exist in portal_deliverables
+    existing_pd_ids = {pd["id"] for pd in project.get("portal_deliverables", [])}
+    invalid = [d for d in deliverable_ids if d not in existing_pd_ids]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown deliverable_ids: {invalid}")
+
+    editor_token = EditorTokenModel(
+        token=secrets.token_urlsafe(32),
+        label=label,
+        deliverable_ids=deliverable_ids,
+    )
+
+    await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {
+            "$push": {"editor_tokens": editor_token.model_dump()},
+            "$set": {"updated_on": datetime.now(timezone.utc)},
+        }
+    )
+    logger.info(f"Editor token created for project {project_id}", extra={"data": {"token_id": editor_token.id}})
+    return editor_token.model_dump()
+
+
+@router.get("/{project_id}/editor-tokens")
+async def list_editor_tokens(
+    project_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    project = await db.projects.find_one(
+        {"_id": ObjectId(project_id)},
+        {"editor_tokens": 1}
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return project.get("editor_tokens", [])
+
+
+@router.delete("/{project_id}/editor-tokens/{token_id}", status_code=204)
+async def delete_editor_token(
+    project_id: str,
+    token_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    db: ScopedDatabase = Depends(get_db)
+):
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid Project ID")
+
+    result = await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {
+            "$pull": {"editor_tokens": {"id": token_id}},
+            "$set": {"updated_on": datetime.now(timezone.utc)},
+        }
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
 @router.post("/{project_id}/deliverables/upload-url")
 async def get_upload_url(
     project_id: str,
@@ -2173,6 +2253,10 @@ async def update_portal_settings(
         updates["portal_default_download_limit"] = body["portal_default_download_limit"]
     if new_watermark_enabled is not None:
         updates["portal_watermark_enabled"] = new_watermark_enabled
+    if "portal_heading" in body:
+        updates["portal_heading"] = body["portal_heading"]
+    if "portal_description" in body:
+        updates["portal_description"] = body["portal_description"]
 
     await db.projects.update_one({"_id": ObjectId(project_id)}, {"$set": updates})
 

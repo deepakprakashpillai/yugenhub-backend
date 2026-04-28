@@ -1,20 +1,16 @@
 from fastapi import APIRouter, Body, HTTPException, Depends
 import re
-from google.oauth2 import id_token
-from google.auth.transport import requests
-from database import users_collection 
+from database import users_collection
 from models.user import UserModel
 from routes.deps import create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
 from datetime import datetime, timedelta, timezone
 from logging_config import get_logger
-import os
 from config import config
 from typing import Optional
+from utils.google_verify import verify_google_id_token
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 logger = get_logger("auth")
-
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID") 
 
 @router.post("/google")
 async def google_login(token_data: dict = Body(...)):
@@ -30,11 +26,10 @@ async def google_login(token_data: dict = Body(...)):
 
     try:
         # 1. Verify Google Token
-        try:
-             id_info = id_token.verify_oauth2_token(token, requests.Request(), GOOGLE_CLIENT_ID)
-        except ValueError as e:
-             logger.warning(f"Google token verification failed: {e}")
-             raise HTTPException(status_code=401, detail="Invalid Google Token")
+        id_info = verify_google_id_token(token)
+        if not id_info:
+            logger.warning("Google token verification failed")
+            raise HTTPException(status_code=401, detail="Invalid Google Token")
 
         email = id_info.get("email")
         google_id = id_info.get("sub")

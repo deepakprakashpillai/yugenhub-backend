@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, timezone
 
 import uuid
@@ -50,8 +50,9 @@ class EventModel(BaseModel):
 class FeedbackEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     message: str
-    author_type: str = "client"  # "client" | "team"
+    author_type: Literal["client", "team", "editor"] = "client"
     author_name: Optional[str] = None
+    author_email: Optional[str] = None
     file_id: Optional[str] = None  # When set, feedback is scoped to a specific file
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -60,8 +61,15 @@ class FileVersion(BaseModel):
     file_name: str
     content_type: str
     uploaded_by: Optional[str] = None
+    uploaded_by_name: Optional[str] = None
     uploaded_on: datetime
     change_notes: str = ""
+    r2_key: Optional[str] = None
+    r2_url: Optional[str] = None
+    thumbnail_r2_key: Optional[str] = None
+    thumbnail_r2_url: Optional[str] = None
+    preview_r2_key: Optional[str] = None
+    preview_r2_url: Optional[str] = None
 
 class DeliverableFile(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -70,6 +78,8 @@ class DeliverableFile(BaseModel):
     r2_key: str
     r2_url: str
     uploaded_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    uploaded_by: Optional[str] = None
+    uploaded_by_name: Optional[str] = None
     # Thumbnail fields
     thumbnail_r2_key: Optional[str] = None
     thumbnail_r2_url: Optional[str] = None
@@ -106,6 +116,13 @@ class PortalDeliverableModel(BaseModel):
     created_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class EditorTokenModel(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    token: str
+    label: str = ""
+    deliverable_ids: List[str] = Field(default_factory=list)
+    created_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 class ProjectModel(BaseModel):
     code: Optional[str] = None
     agency_id: str = "default"
@@ -121,8 +138,11 @@ class ProjectModel(BaseModel):
     portal_watermark_enabled: bool = False
     portal_watermark_text: Optional[str] = None  # Falls back to org_name
     portal_default_download_limit: Optional[int] = None
+    portal_heading: Optional[str] = None
+    portal_description: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     gallery_album_id: Optional[str] = None   # Linked gallery album (auto-created)
+    editor_tokens: List[EditorTokenModel] = Field(default_factory=list)
     created_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_on: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

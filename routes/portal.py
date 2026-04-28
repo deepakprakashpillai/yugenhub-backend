@@ -72,6 +72,11 @@ async def get_portal(token: str):
         if album:
             gallery_url = compute_gallery_url(album, app_config.GALLERY_FRONTEND_URL)
 
+    # Strip editor-only comments — clients must not see them
+    deliverables = project.get("portal_deliverables", [])
+    for d in deliverables:
+        d["feedback"] = [f for f in d.get("feedback", []) if f.get("author_type") != "editor"]
+
     return _parse_mongo({
         "project_code": project.get("code"),
         "status": project.get("status"),
@@ -79,11 +84,14 @@ async def get_portal(token: str):
         "client_name": client_name,
         "metadata": project.get("metadata", {}),
         "events": project.get("events", []),
-        "portal_deliverables": project.get("portal_deliverables", []),
+        "portal_deliverables": deliverables,
         "portal_watermark_enabled": project.get("portal_watermark_enabled", False),
+        "portal_watermark_text": project.get("portal_watermark_text"),
         "created_on": project.get("created_on"),
         "org_settings": org_settings,
         "gallery_url": gallery_url,
+        "portal_heading": project.get("portal_heading"),
+        "portal_description": project.get("portal_description"),
     })
 
 
