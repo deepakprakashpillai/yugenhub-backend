@@ -87,27 +87,33 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
     overdue_tasks = await db.tasks.find(overdue_query).sort("due_date", 1).limit(5).to_list(None)
     
     for t in overdue_tasks:
+        project_id = t.get("project_id")
+        due = t.get("due_date")
+        if due and due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        days_overdue = (now - due).days if due else 0
         items.append({
             "type": "task",
             "id": t.get("id"),
             "title": t.get("title"),
-            "reason": f"Overdue by {(now - t.get('due_date').replace(tzinfo=timezone.utc)).days} days",
+            "reason": f"Overdue by {days_overdue} day{'s' if days_overdue != 1 else ''}",
             "priority": "high",
-            "link": "/tasks" 
+            "link": f"/projects/{project_id}" if project_id else "/tasks"
         })
-        
+
     # 2. Blocked Tasks
     blocked_query = {**task_query, "status": "blocked"}
     blocked_tasks = await db.tasks.find(blocked_query).limit(5).to_list(None)
-    
+
     for t in blocked_tasks:
+        project_id = t.get("project_id")
         items.append({
             "type": "task",
             "id": t.get("id"),
             "title": t.get("title"),
             "reason": "Blocked",
             "priority": "medium",
-            "link": "/tasks"
+            "link": f"/projects/{project_id}" if project_id else "/tasks"
         })
 
     # 3. Risk Events (Global Only for now, complexity reduction)
@@ -137,14 +143,14 @@ async def get_attention_items(scope: str = "global", current_user: UserModel = D
             reason = []
             if not e.get("assignments"): reason.append("No Team")
             if not e.get("deliverables"): reason.append("No Deliverables")
-            
+            project_id = str(e.get("_id")) if e.get("_id") else None
             items.append({
                 "type": "event",
-                "id": str(e.get("_id") or "unknown"),
+                "id": project_id or "unknown",
                 "title": f"{e.get('code')} - {e.get('type')}",
                 "reason": ", ".join(reason),
                 "priority": "high",
-                "link": f"/projects/{e.get('code')}"
+                "link": f"/projects/{project_id}" if project_id else "/calendar"
             })
             
     # Sort by priority (high first) and limit
@@ -177,46 +183,110 @@ async def get_workload_stats(scope: str = "global", current_user: UserModel = De
         return {"due_today": due_today, "due_week": due_week, "overdue": overdue}
         
     else:
-        # Team Load (Admin only)
-        # Find users with high load
+        # Team Load — top 6 users by workload with full task details
         users = await db.users.find({}).to_list(None)
         user_ids = [u.get("id") for u in users]
-        
-        pipeline = [
-            {"$match": {
-                "assigned_to": {"$in": user_ids},
-                "status": {"$ne": "done"}
-            }},
-            {"$group": {
-                "_id": "$assigned_to",
-                "urgent_count": {"$sum": {"$cond": [{"$eq": ["$priority", "urgent"]}, 1, 0]}},
-                "overdue_count": {"$sum": {"$cond": [{"$lt": ["$due_date", now]}, 1, 0]}},
-                "total_count": {"$sum": 1}
-            }}
-        ]
-        
-        load_stats = await db.tasks.aggregate(pipeline).to_list(None)
-        load_map = {stat["_id"]: stat for stat in load_stats}
-        
-        alerts = []
-        for u in users:
-            uid = u.get("id")
-            stats = load_map.get(uid, {})
-            urgent = stats.get("urgent_count", 0)
-            overdue = stats.get("overdue_count", 0)
-            
-            if urgent >= 3 or overdue >= 1:
-                summary = []
-                if urgent >= 3: summary.append(f"{urgent} Urgent Tasks")
-                if overdue >= 1: summary.append(f"{overdue} Overdue")
-                
-                alerts.append({
-                    "user_name": u.get("name"),
-                    "role": u.get("role"),
-                    "overload_summary": ", ".join(summary)
+        user_map = {u.get("id"): u for u in users}
+
+        tasks = await db.tasks.find({
+            "assigned_to": {"$in": user_ids},
+            "status": {"$ne": "done"}
+        }).to_list(None)
+
+        # Collect unique project_ids to resolve names
+        project_ids = list({t.get("project_id") for t in tasks if t.get("project_id")})
+        projects_raw = await db.projects.find({"id": {"$in": project_ids}}).to_list(None)
+        project_map = {}
+        for p in projects_raw:
+            pid = p.get("id")
+            project_map[pid] = {
+                "code": p.get("code", ""),
+                "name": p.get("metadata", {}).get("project_type", p.get("code", "Project"))
+            }
+
+        # Group tasks by user
+        user_tasks: dict = {uid: [] for uid in user_ids}
+        for t in tasks:
+            uid = t.get("assigned_to")
+            if uid in user_tasks:
+                user_tasks[uid].append(t)
+
+        result = []
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+
+        for uid, utasks in user_tasks.items():
+            if not utasks:
+                continue
+            u = user_map.get(uid, {})
+
+            overdue_count = 0
+            urgent_count = 0
+            in_progress_count = 0
+            due_today_count = 0
+            task_list = []
+
+            def _sort_key(x):
+                d = x.get("due_date")
+                if d:
+                    aware = d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+                    return (0 if aware < now else 1, aware)
+                return (1, datetime.max.replace(tzinfo=timezone.utc))
+
+            for t in sorted(utasks, key=_sort_key):
+                due = t.get("due_date")
+                if due:
+                    if due.tzinfo is None:
+                        due = due.replace(tzinfo=timezone.utc)
+                    is_overdue = due < now
+                    is_due_today = today_start <= due < today_end
+                else:
+                    is_overdue = False
+                    is_due_today = False
+
+                if is_overdue:
+                    overdue_count += 1
+                if t.get("priority") == "urgent":
+                    urgent_count += 1
+                if t.get("status") == "in_progress":
+                    in_progress_count += 1
+                if is_due_today:
+                    due_today_count += 1
+
+                proj = project_map.get(t.get("project_id"), {})
+                task_list.append({
+                    "id": t.get("id"),
+                    "title": t.get("title", ""),
+                    "project_id": t.get("project_id"),
+                    "project_code": proj.get("code", ""),
+                    "project_name": proj.get("name", ""),
+                    "due_date": parse_mongo_data(due) if due else None,
+                    "priority": t.get("priority", "medium"),
+                    "status": t.get("status", "todo"),
+                    "type": t.get("type", "internal"),
+                    "is_overdue": is_overdue,
                 })
-                
-        return alerts
+
+            load_score = overdue_count * 3 + urgent_count * 2 + len(utasks)
+            result.append({
+                "user_id": uid,
+                "user_name": u.get("name", "Unknown"),
+                "role": u.get("role", "member"),
+                "stats": {
+                    "total": len(utasks),
+                    "overdue": overdue_count,
+                    "urgent": urgent_count,
+                    "in_progress": in_progress_count,
+                    "due_today": due_today_count,
+                },
+                "tasks": task_list,
+                "load_score": load_score,
+            })
+
+        result.sort(key=lambda x: x["load_score"], reverse=True)
+        for r in result:
+            del r["load_score"]
+        return result[:6]
 
 
 @router.get("/pipeline")
@@ -234,7 +304,7 @@ async def get_project_pipeline(current_user: UserModel = Depends(get_current_use
     results = await db.projects.aggregate(pipeline).to_list(None)
     # Format: [{"name": "Weddings", "value": 5}, ...]
     # Normalize ID if null
-    return [{"name": (r["_id"] or "Other").title(), "value": r["count"]} for r in results]
+    return [{"id": r["_id"] or "other", "name": (r["_id"] or "Other").title(), "value": r["count"]} for r in results]
 
 @router.get("/schedule")
 async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_user), db: ScopedDatabase = Depends(get_db)):
@@ -261,6 +331,7 @@ async def get_upcoming_schedule(current_user: UserModel = Depends(get_current_us
             "venue_location": "$events.venue_location",
             "assignments": "$events.assignments",
             "project_code": "$code",
+            "project_id": {"$toString": "$_id"},
             "description": "$events.description",
             "client_id": "$client_id"
         }}
@@ -366,6 +437,7 @@ async def get_recent_activity(limit: int = 10, current_user: UserModel = Depends
     users = await db.users.find({"id": {"$in": user_ids}}).to_list(None)
     
     task_map = {t["id"]: t.get("title", "Unknown Task") for t in tasks}
+    task_project_map = {t["id"]: t.get("project_id") for t in tasks}
     user_map = {u["id"]: u.get("name", "Unknown User") for u in users}
     
     # Transform for frontend
@@ -389,10 +461,13 @@ async def get_recent_activity(limit: int = 10, current_user: UserModel = Depends
         if isinstance(timestamp, datetime) and timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
             
+        project_id = task_project_map.get(t_id)
         activity.append({
             "id": str(log["_id"]),
             "user_name": user_map.get(u_id, "System"),
+            "task_id": t_id,
             "task_title": task_map.get(t_id, t_id),
+            "project_id": project_id,
             "action": action_text,
             "timestamp": timestamp
         })

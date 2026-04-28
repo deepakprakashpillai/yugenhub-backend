@@ -82,3 +82,62 @@ def delete_r2_object(r2_key: str):
         client.delete_object(Bucket=config.R2_BUCKET_NAME, Key=r2_key)
     except Exception as e:
         logger.error(f"Failed to delete R2 object {r2_key}: {e}")
+
+
+def create_multipart_upload(key: str, content_type: str) -> str:
+    """Initiates a multipart upload. Returns upload_id."""
+    client = get_r2_client()
+    response = client.create_multipart_upload(
+        Bucket=config.R2_BUCKET_NAME,
+        Key=key,
+        ContentType=content_type,
+    )
+    return response["UploadId"]
+
+
+def generate_presigned_upload_part_url(
+    key: str, upload_id: str, part_number: int, expires_in: int = 3600
+) -> str:
+    """Returns a presigned URL for uploading a single part in a multipart upload."""
+    client = get_r2_client()
+    url = client.generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": config.R2_BUCKET_NAME,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=expires_in,
+    )
+    return url
+
+
+def complete_multipart_upload(key: str, upload_id: str, parts: list) -> str:
+    """Completes a multipart upload. Returns the public R2 URL for the object.
+
+    parts shape: [{"PartNumber": int, "ETag": str}, ...]
+    """
+    client = get_r2_client()
+    client.complete_multipart_upload(
+        Bucket=config.R2_BUCKET_NAME,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": parts},
+    )
+    logger.info(f"Completed multipart upload: {key}")
+    return f"{config.R2_PUBLIC_URL}/{key}" if config.R2_PUBLIC_URL else ""
+
+
+def abort_multipart_upload(key: str, upload_id: str) -> None:
+    """Aborts an in-progress multipart upload, releasing any stored parts."""
+    try:
+        client = get_r2_client()
+        client.abort_multipart_upload(
+            Bucket=config.R2_BUCKET_NAME,
+            Key=key,
+            UploadId=upload_id,
+        )
+        logger.info(f"Aborted multipart upload: {key}")
+    except Exception as e:
+        logger.error(f"Failed to abort multipart upload {key}: {e}")
